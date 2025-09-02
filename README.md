@@ -1,4 +1,4 @@
-# Generic Playwright AI Test Framework
+# Playwright Python AI Test Framework
 
 A comprehensive test automation framework built with Python, Playwright, and AI-powered healing capabilities. This framework provides a robust foundation for web application testing with intelligent test failure analysis and automated recovery.
 
@@ -17,9 +17,10 @@ A comprehensive test automation framework built with Python, Playwright, and AI-
 
 ### Prerequisites
 
-- Python 3.8 or higher
-- Node.js (for Playwright browser installation)
-- Ollama (for AI healing capabilities)
+- Python 3.11+
+- Node.js
+- Ollama (for AI healing)
+- Allure Commandline
 
 ### Installation
 
