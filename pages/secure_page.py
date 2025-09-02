@@ -26,9 +26,11 @@ class SecurePage(BasePage):
     async def is_on_secure_page(self) -> bool:
         """Check if currently on the secure page."""
         try:
-            await self.expect_url_contains("secure")
-            return True
-        except Exception:
+            current_url = await self.get_url()
+            debug_print(f"Checking secure page - current URL: {current_url}")
+            return "secure" in current_url
+        except Exception as e:
+            debug_print(f"Error checking secure page: {e}")
             return False
     
     async def get_page_title(self) -> str:
