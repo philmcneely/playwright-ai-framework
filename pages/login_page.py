@@ -1,5 +1,39 @@
 """
-Login page object for The Internet test site.
+===============================================================================
+LoginPage Object for The Internet Test Site
+===============================================================================
+This module defines the LoginPage class, which provides locators and helper
+methods for interacting with and verifying login functionality
+on The Internet test site using Playwright.
+
+Features:
+    ✓ Locators for username/password inputs and login button
+    ✓ Methods for performing login with various user credentials
+    ✓ Validation methods for checking login success/failure states
+    ✓ Usage of @property for clean locator access
+    ✓ Async methods for Playwright compatibility
+
+Usage Example:
+    from pages.login_page import LoginPage
+    
+    @pytest.mark.asyncio
+    async def test_valid_login(page):
+        login_page = LoginPage(page)
+        await login_page.navigate()
+        await login_page.enter_username("tomsmith")
+        await login_page.enter_password("SuperSecretPassword!")
+        await login_page.click_login()
+        # Verify successful login
+        
+Dependencies:
+    - playwright.async_api: Async Page objects
+    - pages.base_page: BasePage inheritance
+    - config.settings: Environment configuration
+    - utils.debug: Debug logging utilities
+
+Author: Playwright AI Test Framework
+Site: The Internet (https://the-internet.herokuapp.com)
+===============================================================================
 """
 from playwright.async_api import Page
 from pages.base_page import BasePage

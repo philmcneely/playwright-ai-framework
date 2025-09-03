@@ -1,6 +1,42 @@
 """
-Main application page object for The Internet test site.
-Provides centralized access to all page objects.
+===============================================================================
+App Class for The Internet Test Site
+===============================================================================
+This module defines the App class, which serves as a central aggregator for all
+page objects in The Internet test site automation suite. It provides a single
+entry point for accessing all page objects, eliminating the need to pass
+multiple page fixtures to test functions.
+
+Features:
+    ✓ Centralized access to all page objects through a single class
+    ✓ Eliminates the need for multiple page fixtures in test functions
+    ✓ Clean and organized approach to managing page objects
+    ✓ Easy to extend with new page objects as the test suite grows
+    ✓ Maintains separation of concerns while providing convenience
+
+Usage Example:
+    from pages.app import App
+    
+    @pytest.mark.asyncio
+    async def test_login_flow(page):
+        app = App(page)
+        await app.login.navigate()
+        await app.login.enter_username("tomsmith")
+        await app.login.enter_password("SuperSecretPassword!")
+        await app.login.click_login()
+        
+        # Access secure page through same app instance
+        assert await app.secure.is_on_secure_page()
+        
+Dependencies:
+    - pages.login_page: LoginPage object
+    - pages.secure_page: SecurePage object
+    - config.settings: Environment configuration
+    - utils.debug: Debug logging utilities
+
+Author: Playwright AI Test Framework
+Site: The Internet (https://the-internet.herokuapp.com)
+===============================================================================
 """
 from playwright.async_api import Page
 from pages.login_page import LoginPage

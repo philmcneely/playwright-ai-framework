@@ -1,5 +1,44 @@
 """
-Base page class providing common functionality for all page objects.
+===============================================================================
+BasePage Class for The Internet Test Site
+===============================================================================
+This module defines the BasePage class, which serves as the foundation for all
+page objects in The Internet test site automation suite. It provides common
+functionality and utilities that are shared across all page objects, promoting
+code reuse and maintaining consistency.
+
+Features:
+    ✓ Common navigation and page interaction methods
+    ✓ Shared utility functions for element waiting and verification
+    ✓ Consistent error handling and logging across all page objects
+    ✓ Base functionality for URL management and page state verification
+    ✓ Foundation for implementing page object inheritance patterns
+
+Usage Example:
+    from pages.base_page import BasePage
+    
+    class LoginPage(BasePage):
+        def __init__(self, page):
+            super().__init__(page)
+            self.url = "https://the-internet.herokuapp.com/login"
+        
+        async def navigate(self):
+            await self.navigate_to(self.url)
+
+Conventions:
+    - All page objects should inherit from BasePage for consistency
+    - Common functionality is implemented here to avoid code duplication
+    - Page-specific logic should be implemented in individual page classes
+    - All methods are async to maintain Playwright compatibility
+
+Dependencies:
+    - playwright.async_api: Page and Locator objects
+    - config.settings: Environment configuration
+    - utils.debug: Debug logging utilities
+
+Author: Playwright AI Test Framework
+Site: The Internet (https://the-internet.herokuapp.com)
+===============================================================================
 """
 from abc import ABC
 from typing import Literal

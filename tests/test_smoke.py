@@ -1,6 +1,32 @@
 """
-Smoke tests for The Internet test site.
-Basic functionality verification tests.
+===============================================================================
+Smoke Tests for The Internet Test Site
+===============================================================================
+This module contains essential smoke tests that verify basic functionality
+and critical user journeys on The Internet test site. These tests serve as
+a quick validation suite to ensure the application is functional before
+running more comprehensive test suites.
+
+Features:
+    ✓ Basic page load verification and accessibility
+    ✓ Core navigation and login flow validation
+    ✓ Cross-browser compatibility verification
+    ✓ Essential user journey testing
+
+Usage Example:
+    pytest tests/test_smoke.py
+    pytest -m smoke
+
+Conventions:
+    - Tests are designed to run quickly and fail fast
+    - Each test focuses on critical functionality only
+    - All tests are marked with @pytest.mark.smoke
+    - Tests should be stable and reliable for CI/CD pipelines
+
+Author: Playwright AI Test Framework
+Site: The Internet (https://the-internet.herokuapp.com)
+Date: [2025-09-03]
+===============================================================================
 """
 import pytest
 from pages.app import App

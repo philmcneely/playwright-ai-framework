@@ -1,5 +1,32 @@
 """
-Login tests for The Internet test site.
+===============================================================================
+Login Flow and Navigation Tests for The Internet Test Site
+===============================================================================
+This module contains tests that verify The Internet test site's login flows,
+navigation paths, and authentication functionality including both successful
+and failed login scenarios.
+
+Features:
+    ✓ Tests for valid login with demo user credentials
+    ✓ Verifies unsuccessful login attempts with invalid credentials
+    ✓ Tests empty credential handling and validation
+    ✓ Validates logout functionality and session management
+    ✓ Tests form field interactions and user experience
+
+Usage Example:
+    pytest tests/test_login.py
+    pytest tests/test_login.py -m smoke
+
+Conventions:
+    - Each test is marked as async and uses Playwright's async API
+    - Test data uses predefined users from test_data module
+    - Comments explain the purpose and steps of each test
+    - All tests verify both UI state and underlying functionality
+
+Author: Playwright AI Test Framework
+Site: The Internet (https://the-internet.herokuapp.com)
+Date: [2025-09-03]
+===============================================================================
 """
 import pytest
 from pages.app import App

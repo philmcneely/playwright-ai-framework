@@ -1,5 +1,40 @@
 """
-Secure page object for The Internet test site post-login area.
+===============================================================================
+SecurePage Object for The Internet Test Site
+===============================================================================
+This module defines the SecurePage class, which provides locators and helper
+methods for interacting with the secure area page on The Internet test site.
+This page is accessed after successful login and provides functionality for
+logout and verification of authenticated state.
+
+Features:
+    ✓ Locators for secure area elements (page title, flash messages, logout)
+    ✓ Methods for verifying successful login state
+    ✓ Logout functionality and verification
+    ✓ Flash message reading and validation
+    ✓ URL-based page state verification
+
+Usage Example:
+    from pages.secure_page import SecurePage
+    
+    @pytest.mark.asyncio
+    async def test_secure_area_access(page):
+        secure_page = SecurePage(page)
+        # After login...
+        assert await secure_page.is_on_secure_page()
+        flash_text = await secure_page.get_flash_message()
+        assert "You logged into a secure area!" in flash_text
+        await secure_page.logout()
+
+Dependencies:
+    - playwright.async_api: Async Page objects
+    - pages.base_page: BasePage inheritance
+    - config.settings: Environment configuration
+    - utils.debug: Debug logging utilities
+
+Author: Playwright AI Test Framework
+Site: The Internet (https://the-internet.herokuapp.com)
+===============================================================================
 """
 from playwright.async_api import Page
 from pages.base_page import BasePage
