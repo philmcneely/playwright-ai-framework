@@ -59,6 +59,26 @@ Run smoke tests only:
 pytest -m smoke
 ```
 
+Run regression tests:
+```bash
+pytest -m regression
+```
+
+Run performance tests:
+```bash
+pytest -m performance
+```
+
+Run visual regression tests:
+```bash
+pytest -m visual
+```
+
+Run AI healing demonstration tests:
+```bash
+pytest -m ai_healing
+```
+
 Run with debug output:
 ```bash
 DEBUG_MSG=true pytest
@@ -87,8 +107,12 @@ playwright-ai-framework/
 │   └── test_data.py    # User credentials and test data
 ├── tests/              # Test files
 │   ├── __init__.py
+│   ├── test_ai_healing.py # AI healing demonstration tests
 │   ├── test_login.py   # Login functionality tests
-│   └── test_smoke.py   # Smoke tests
+│   ├── test_performance.py # Performance monitoring tests
+│   ├── test_regression.py # Comprehensive regression tests
+│   ├── test_smoke.py   # Smoke tests
+│   └── test_visual.py  # Visual regression tests
 ├── utils/              # Utility modules
 │   ├── __init__.py
 │   ├── ai_healing.py   # AI-powered test healing
