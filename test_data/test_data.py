@@ -66,6 +66,8 @@ EXPECTED_MESSAGES = {
     "login_failure": "Your username is invalid!",
     "logout_success": "You logged out of the secure area!",
     "password_invalid": "Your password is invalid!",
+    "invalid_username": "Your username is invalid!",
+    "invalid_password": "Your password is invalid!",
     "secure_area_title": "Secure Area",
     "login_page_title": "Login Page"
 }

@@ -134,3 +134,24 @@ class LoginPage(BasePage):
     async def get_password_value(self) -> str:
         """Get the current value in password field."""
         return await self.password_input.input_value()
+
+    async def is_on_login_page(self) -> bool:
+        """Check if currently on the login page."""
+        current_url = self.page.url
+        return "/login" in current_url
+    
+    async def enter_username(self, username: str) -> None:
+        """Enter username in the username field."""
+        await self.fill_text(self.username_input, username)
+    
+    async def enter_password(self, password: str) -> None:
+        """Enter password in the password field."""
+        await self.fill_text(self.password_input, password)
+    
+    async def clear_username(self) -> None:
+        """Clear the username field."""
+        await self.username_input.clear()
+    
+    async def clear_password(self) -> None:
+        """Clear the password field."""
+        await self.password_input.clear()
