@@ -252,7 +252,7 @@ async def page():
         async with async_playwright() as p:
             browser_name = os.getenv("BROWSER", settings.BROWSER).lower()
             headless = os.getenv("HEADLESS", str(settings.HEADLESS)).lower() == "true"
-            browser_options = settings.get_browser_options(browser_name)
+            browser_options = settings.get_browser_options()
             browser_options["headless"] = headless
             if browser_name == "chromium":
                 browser = await p.chromium.launch(**browser_options)

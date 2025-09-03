@@ -34,40 +34,18 @@ class Settings:
     DEBUG_MSG: bool = os.getenv("DEBUG_MSG", "false").lower() == "true" 
 
     @classmethod
-    def get_browser_options(cls, browser_name: str = "chromium") -> dict:
-        """Get browser launch options based on browser type."""
-        base_options = {
+    def get_browser_options(cls) -> dict:
+        """Get browser launch options."""
+        return {
             "headless": cls.HEADLESS,
             "slow_mo": cls.SLOW_MO,
-        }
-        
-        # Browser-specific arguments
-        if browser_name.lower() == "chromium":
-            base_options["args"] = [
+            "args": [
                 "--disable-blink-features=AutomationControlled",
                 "--disable-extensions",
                 "--no-sandbox",
                 "--disable-dev-shm-usage"
             ]
-        elif browser_name.lower() == "firefox":
-            # Firefox-specific preferences
-            base_options["firefox_user_prefs"] = {
-                "dom.webdriver.enabled": False,
-                "useAutomationExtension": False,
-                "general.platform.override": "",
-                "general.useragent.override": ""
-            }
-        elif browser_name.lower() == "webkit":
-            # WebKit doesn't need special args for automation hiding
-            base_options["args"] = []
-        else:
-            # Default args for unknown browsers
-            base_options["args"] = [
-                "--disable-extensions",
-                "--no-sandbox"
-            ]
-            
-        return base_options
+        }
 
 
 # Create a global settings instance
