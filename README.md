@@ -229,7 +229,7 @@ async def test_homepage_visual(page, visual_regression):
 Run:
 
 ```sh
-pytest tests/visual/ -v
+pytest tests/visual_regression/ -v
 ```
 
 ---
@@ -505,7 +505,7 @@ python onefilellm.py /path/to/your/local/repo
 ├── 📂 data/                            — Test data
 ├── 📂 config/                          — Settings
 ├── 📂 tests/                           — Test files
-│   ├── 📂 visual/                      — Visual regression tests
+│   ├── 📂 visual_regression/           — Visual regression tests
 │   └── 📂 api/                         — API mocking tests
 ```
 
