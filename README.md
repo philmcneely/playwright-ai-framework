@@ -452,6 +452,10 @@ python onefilellm.py /path/to/your/local/repo
   Ensure Allure is installed and available in your `PATH`.
 - **Windows build errors:**  
   Install the Visual C++ Build Tools as described above.
+- **Firefox "automationcontrolled" error:**  
+  This is fixed in the current version. The framework now uses browser-specific configurations to avoid conflicts between Chromium and Firefox arguments.
+- **Browser "Executable doesn't exist" errors:**  
+  Run `python -m playwright install --with-deps` to download all browser binaries.
 
 ---
 
