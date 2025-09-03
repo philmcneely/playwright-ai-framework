@@ -59,24 +59,31 @@ Run smoke tests only:
 pytest -m smoke
 ```
 
-Run regression tests:
+Run login tests:
 ```bash
-pytest -m regression
+pytest tests/login/
 ```
 
-Run performance tests:
+Run security/attack tests:
 ```bash
-pytest -m performance
+pytest tests/login/test_login_attacks.py
 ```
 
 Run visual regression tests:
 ```bash
-pytest -m visual
+pytest tests/visual_regression/
 ```
 
-Run AI healing demonstration tests:
+Run API mocking tests:
 ```bash
-pytest -m ai_healing
+pytest tests/api/
+```
+
+Run by specific markers:
+```bash
+pytest -m login          # All login-related tests
+pytest -m visual         # Visual regression tests
+pytest -m api_mocking    # API mocking tests
 ```
 
 Run with debug output:
@@ -105,14 +112,17 @@ playwright-ai-framework/
 │   └── secure_page.py  # Secure area page object
 ├── test_data/          # Test data and personas
 │   └── test_data.py    # User credentials and test data
-├── tests/              # Test files
+├── tests/              # Test files organized by category
 │   ├── __init__.py
-│   ├── test_ai_healing.py # AI healing demonstration tests
-│   ├── test_login.py   # Login functionality tests
-│   ├── test_performance.py # Performance monitoring tests
-│   ├── test_regression.py # Comprehensive regression tests
 │   ├── test_smoke.py   # Smoke tests
-│   └── test_visual.py  # Visual regression tests
+│   ├── api/           # API mocking and network tests
+│   │   └── test_api_mocking.py
+│   ├── login/         # Login functionality tests
+│   │   ├── test_login.py # Core login functionality
+│   │   ├── test_login_attacks.py # Security and attack tests
+│   │   └── test_login_error_conditions.py # Error handling tests
+│   └── visual_regression/ # Visual regression tests
+│       └── test_visual_regression.py
 ├── utils/              # Utility modules
 │   ├── __init__.py
 │   ├── ai_healing.py   # AI-powered test healing
