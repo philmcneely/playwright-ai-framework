@@ -3,13 +3,13 @@
 LoginPage Object for The Internet Test Site
 ===============================================================================
 This module defines the LoginPage class, which provides locators and helper
-methods for interacting with and verifying login functionality
+methods for interacting with the login form and verifying login functionality
 on The Internet test site using Playwright.
 
 Features:
-    ✓ Locators for username/password inputs and login button
-    ✓ Methods for performing login with various user credentials
-    ✓ Validation methods for checking login success/failure states
+    ✓ Locators for username and password input fields
+    ✓ Methods for entering credentials and submitting login form
+    ✓ Error message handling and verification
     ✓ Usage of @property for clean locator access
     ✓ Async methods for Playwright compatibility
 
@@ -23,135 +23,175 @@ Usage Example:
         await login_page.enter_username("tomsmith")
         await login_page.enter_password("SuperSecretPassword!")
         await login_page.click_login()
-        # Verify successful login
         
-Dependencies:
-    - playwright.async_api: Async Page objects
-    - pages.base_page: BasePage inheritance
-    - config.settings: Environment configuration
-    - utils.debug: Debug logging utilities
+        # Verify successful login
+        assert await login_page.is_login_successful()
 
-Author: Playwright AI Test Framework
+Conventions:
+    - All locators are defined as @property methods for clarity and reusability
+    - All Playwright actions and queries are implemented as async methods
+    - Error messages are handled with specific methods for different scenarios
+    - Navigation methods are provided for direct page access
+
+Author: PMAC
 Site: The Internet (https://the-internet.herokuapp.com)
 ===============================================================================
 """
-from playwright.async_api import Page
-from pages.base_page import BasePage
-from config.settings import settings
-from utils.debug import debug_print
+from .base_page import BasePage
 
 
 class LoginPage(BasePage):
-    """Page object for login functionality on The Internet test site."""
-    
-    def __init__(self, page: Page):
+    def __init__(self, page):
         super().__init__(page)
-        self.url = f"{settings.BASE_URL}/login"
-        
-        # Locators
-        self.username_input = page.locator("#username")
-        self.password_input = page.locator("#password")
-        self.login_button = page.locator("button[type='submit']")
-        self.flash_message = page.locator("#flash")
-        self.page_title = page.locator("h2")
-        
-        # Error message locators
-        self.error_message = page.locator(".flash.error")
-        self.success_message = page.locator(".flash.success")
-    
-    async def navigate(self) -> None:
-        """Navigate to the login page."""
-        debug_print(f"Navigating to login page: {self.url}")
-        await self.navigate_to(self.url)
-        await self.wait_for_load_state()
-    
-    async def login(self, username: str, password: str) -> None:
-        """Perform login with provided credentials."""
-        debug_print(f"Attempting login with username: {username}")
-        
-        await self.fill_text(self.username_input, username)
-        await self.fill_text(self.password_input, password)
-        await self.click_element(self.login_button)
-        
-        # Wait for page to respond (either success or error)
-        await self.page.wait_for_load_state("networkidle")
-    
-    async def login_with_demo_user(self) -> None:
-        """Login with the demo user credentials from settings."""
-        demo_user = settings.DEMO_USER
-        await self.login(demo_user["username"], demo_user["password"])
-    
-    async def login_with_admin_user(self) -> None:
-        """Login with the admin user credentials from settings."""
-        admin_user = settings.ADMIN_USER
-        await self.login(admin_user["username"], admin_user["password"])
-    
-    async def get_flash_message(self) -> str:
-        """Get the flash message text."""
-        if await self.is_visible(self.flash_message):
-            return await self.get_text(self.flash_message)
-        return ""
-    
-    async def is_login_successful(self) -> bool:
-        """Check if login was successful by looking for success indicators."""
-        try:
-            # Check if we're redirected to secure area
-            await self.page.wait_for_url("**/secure", timeout=5000)
-            return True
-        except Exception:
-            return False
-    
-    async def is_error_displayed(self) -> bool:
-        """Check if login error is displayed."""
-        return await self.is_visible(self.error_message)
-    
-    async def get_page_title(self) -> str:
-        """Get the page title text."""
-        return await self.get_text(self.page_title)
-    
-    async def clear_form(self) -> None:
-        """Clear the login form fields."""
-        debug_print("Clearing login form")
-        await self.username_input.clear()
-        await self.password_input.clear()
-    
-    async def is_username_field_visible(self) -> bool:
-        """Check if username field is visible."""
-        return await self.is_visible(self.username_input)
-    
-    async def is_password_field_visible(self) -> bool:
-        """Check if password field is visible."""
-        return await self.is_visible(self.password_input)
-    
-    async def is_login_button_visible(self) -> bool:
-        """Check if login button is visible."""
-        return await self.is_visible(self.login_button)
-    
-    async def get_username_value(self) -> str:
-        """Get the current value in username field."""
-        return await self.username_input.input_value()
-    
-    async def get_password_value(self) -> str:
-        """Get the current value in password field."""
-        return await self.password_input.input_value()
+        self.url = "https://the-internet.herokuapp.com/login"
 
-    async def is_on_login_page(self) -> bool:
-        """Check if currently on the login page."""
-        current_url = self.page.url
-        return "/login" in current_url
-    
-    async def enter_username(self, username: str) -> None:
-        """Enter username in the username field."""
-        await self.fill_text(self.username_input, username)
-    
-    async def enter_password(self, password: str) -> None:
-        """Enter password in the password field."""
-        await self.fill_text(self.password_input, password)
-    
-    async def clear_username(self) -> None:
+    # =====================================
+    # Navigation Methods
+    # =====================================
+    async def navigate(self):
+        """Navigate directly to the login page."""
+        await self.goto(self.url)
+
+    async def load(self):
+        """Load the login page (alias for navigate)."""
+        await self.navigate()
+
+    # =====================================
+    # Username Field
+    # =====================================
+    @property
+    def username_field(self):
+        """Locator for the username input field."""
+        return self.page.locator("#username")
+
+    async def enter_username(self, username: str):
+        """Enter username into the username field."""
+        await self.username_field.fill(username)
+
+    async def get_username_value(self) -> str:
+        """Get the current value from the username field."""
+        return await self.username_field.input_value()
+
+    # =====================================
+    # Password Field
+    # =====================================
+    @property
+    def password_field(self):
+        """Locator for the password input field."""
+        return self.page.locator("#password")
+
+    async def enter_password(self, password: str):
+        """Enter password into the password field."""
+        await self.password_field.fill(password)
+
+    async def get_password_value(self) -> str:
+        """Get the current value from the password field."""
+        return await self.password_field.input_value()
+
+    # =====================================
+    # Login Button
+    # =====================================
+    @property
+    def login_button(self):
+        """Locator for the login submit button."""
+        return self.page.locator("button[type='submit']")
+
+    async def click_login(self):
+        """Click the login button to submit the form."""
+        await self.login_button.click()
+
+    # =====================================
+    # Convenience Methods
+    # =====================================
+    async def login_with_credentials(self, username: str, password: str):
+        """Complete login flow with username and password."""
+        await self.enter_username(username)
+        await self.enter_password(password)
+        await self.click_login()
+
+    async def login(self, username: str, password: str):
+        """Alias for login_with_credentials for backward compatibility."""
+        await self.login_with_credentials(username, password)
+
+    async def login_with_demo_user(self):
+        """Login with the demo user credentials."""
+        await self.login_with_credentials("tomsmith", "SuperSecretPassword!")
+
+    async def get_flash_message(self) -> str:
+        """Convenience method - returns flash message text (success or error)."""
+        # Try success message first, then error message
+        if await self.is_login_successful():
+            return await self.get_success_message_text()
+        elif await self.has_error_message():
+            return await self.get_error_message_text()
+        return ""
+
+    async def clear_username(self):
         """Clear the username field."""
-        await self.username_input.clear()
-    
-    async def clear_password(self) -> None:
+        await self.username_field.clear()
+
+    async def clear_password(self):
         """Clear the password field."""
-        await self.password_input.clear()
+        await self.password_field.clear()
+
+    async def enter_passwordx(self, password: str):
+        """
+        Intentionally broken method for AI healing testing.
+        Uses incorrect locator to trigger healing mechanism.
+        """
+        # Incorrect locator - should be #password but using wrong selector
+        wrong_password_field = self.page.locator("#passwordx")
+        await wrong_password_field.fill(password)
+
+    # =====================================
+    # Success Verification
+    # =====================================
+    @property
+    def success_message(self):
+        """Locator for the success flash message."""
+        return self.page.locator(".flash.success")
+
+    async def is_login_successful(self) -> bool:
+        """Check if login was successful by looking for success message."""
+        return await self.success_message.is_visible()
+
+    async def get_success_message_text(self) -> str:
+        """Get the text of the success message."""
+        if await self.success_message.is_visible():
+            text = await self.success_message.text_content()
+            return text.strip() if text else ""
+        return ""
+
+    # =====================================
+    # Error Message Handling
+    # =====================================
+    @property
+    def error_message(self):
+        """Locator for the error flash message."""
+        return self.page.locator(".flash.error")
+
+    async def has_error_message(self) -> bool:
+        """Check if an error message is displayed."""
+        return await self.error_message.is_visible()
+
+    async def get_error_message_text(self) -> str:
+        """Get the text of the error message."""
+        if await self.error_message.is_visible():
+            text = await self.error_message.text_content()
+            return text.strip() if text else ""
+        return ""
+
+    # =====================================
+    # Page State Verification
+    # =====================================
+    async def is_on_login_page(self) -> bool:
+        """Verify that we are on the login page."""
+        current_url = await self.get_url()
+        return "/login" in current_url
+
+    async def get_page_heading(self) -> str:
+        """Get the main heading text on the login page."""
+        heading = self.page.locator("h2")
+        if await heading.is_visible():
+            return await heading.text_content() or ""
+        return ""

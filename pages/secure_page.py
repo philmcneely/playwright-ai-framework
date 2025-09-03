@@ -26,91 +26,115 @@ Usage Example:
         assert "You logged into a secure area!" in flash_text
         await secure_page.logout()
 
-Dependencies:
-    - playwright.async_api: Async Page objects
-    - pages.base_page: BasePage inheritance
-    - config.settings: Environment configuration
-    - utils.debug: Debug logging utilities
+Conventions:
+    - All locators are defined as @property methods for clarity and reusability
+    - All Playwright actions and queries are implemented as async methods
+    - Page state verification methods for robust test assertions
+    - Clear separation between actions and verifications
 
-Author: Playwright AI Test Framework
+Author: PMAC
 Site: The Internet (https://the-internet.herokuapp.com)
 ===============================================================================
 """
-from playwright.async_api import Page
-from pages.base_page import BasePage
-from config.settings import settings
-from utils.debug import debug_print
+from .base_page import BasePage
 
 
 class SecurePage(BasePage):
-    """Page object for the secure area after successful login."""
-    
-    def __init__(self, page: Page):
+    def __init__(self, page):
         super().__init__(page)
-        self.url = f"{settings.BASE_URL}/secure"
-        
-        # Locators
-        self.page_title = page.locator("h2")
-        self.flash_message = page.locator("#flash")
-        self.logout_button = page.locator("a[href='/logout']")
-        self.secure_area_text = page.locator(".subheader")
-        
-        # Success message locator
-        self.success_message = page.locator(".flash.success")
-    
-    async def is_on_secure_page(self) -> bool:
-        """Check if currently on the secure page."""
-        try:
-            current_url = await self.get_url()
-            debug_print(f"Checking secure page - current URL: {current_url}")
-            return "secure" in current_url
-        except Exception as e:
-            debug_print(f"Error checking secure page: {e}")
-            return False
-    
-    async def get_page_title(self) -> str:
-        """Get the secure page title."""
-        return await self.get_text(self.page_title)
-    
+        self.url = "https://the-internet.herokuapp.com/secure"
+
+    # =====================================
+    # Navigation Methods
+    # =====================================
+    async def navigate(self):
+        """Navigate directly to the secure page (requires authentication)."""
+        await self.goto(self.url)
+
+    # =====================================
+    # Page Heading
+    # =====================================
+    @property
+    def page_heading(self):
+        """Locator for the secure area page heading."""
+        return self.page.locator("h2")
+
+    async def get_page_heading_text(self) -> str:
+        """Get the text of the page heading."""
+        if await self.page_heading.is_visible():
+            return await self.page_heading.text_content() or ""
+        return ""
+
+    # =====================================
+    # Flash Messages
+    # =====================================
+    @property
+    def flash_message(self):
+        """Locator for flash messages (success/error)."""
+        return self.page.locator("#flash")
+
+    @property
+    def success_message(self):
+        """Locator for success flash message."""
+        return self.page.locator(".flash.success")
+
+    async def get_flash_message_text(self) -> str:
+        """Get the text of the flash message."""
+        if await self.flash_message.is_visible():
+            text = await self.flash_message.text_content()
+            return text.strip() if text else ""
+        return ""
+
+    async def has_success_message(self) -> bool:
+        """Check if a success flash message is displayed."""
+        return await self.success_message.is_visible()
+
+    # =====================================
+    # Convenience Methods (Backward Compatibility)
+    # =====================================
     async def get_flash_message(self) -> str:
-        """Get the flash message text."""
-        if await self.is_visible(self.flash_message):
-            return await self.get_text(self.flash_message)
+        """Convenience method - alias for get_flash_message_text()."""
+        return await self.get_flash_message_text()
+
+    # =====================================
+    # Logout Functionality
+    # =====================================
+    @property
+    def logout_link(self):
+        """Locator for the logout link."""
+        return self.page.locator("a[href='/logout']")
+
+    async def logout(self):
+        """Click the logout link to end the session."""
+        await self.logout_link.click()
+
+    async def is_logout_link_visible(self) -> bool:
+        """Check if the logout link is visible on the page."""
+        return await self.logout_link.is_visible()
+
+    # =====================================
+    # Page State Verification
+    # =====================================
+    async def is_on_secure_page(self) -> bool:
+        """Verify that we are on the secure area page."""
+        current_url = await self.get_url()
+        return "/secure" in current_url
+
+    async def is_authenticated(self) -> bool:
+        """
+        Verify that the user is authenticated by checking for secure page elements.
+        This checks for both the correct URL and the presence of the logout link.
+        """
+        is_on_secure = await self.is_on_secure_page()
+        has_logout = await self.is_logout_link_visible()
+        return is_on_secure and has_logout
+
+    # =====================================
+    # Content Verification
+    # =====================================
+    async def get_page_content(self) -> str:
+        """Get the main content text of the secure page."""
+        content = self.page.locator(".subheader")
+        if await content.is_visible():
+            return await content.text_content() or ""
         return ""
-    
-    async def get_secure_area_text(self) -> str:
-        """Get the secure area description text."""
-        if await self.is_visible(self.secure_area_text):
-            return await self.get_text(self.secure_area_text)
-        return ""
-    
-    async def logout(self) -> None:
-        """Click the logout button."""
-        debug_print("Clicking logout button")
-        await self.click_element(self.logout_button)
-        await self.wait_for_load_state("networkidle")
-    
-    async def is_logout_button_visible(self) -> bool:
-        """Check if logout button is visible."""
-        return await self.is_visible(self.logout_button)
-    
-    async def is_success_message_displayed(self) -> bool:
-        """Check if success message is displayed."""
-        return await self.is_visible(self.success_message)
-    
-    async def wait_for_secure_page_load(self) -> None:
-        """Wait for the secure page to fully load."""
-        debug_print("Waiting for secure page to load")
-        await self.wait_for_element(self.page_title)
-        await self.wait_for_element(self.logout_button)
-    
-    async def verify_successful_login(self) -> bool:
-        """Verify that login was successful and user is on secure page."""
-        try:
-            await self.wait_for_secure_page_load()
-            is_on_page = await self.is_on_secure_page()
-            has_logout = await self.is_logout_button_visible()
-            return is_on_page and has_logout
-        except Exception as e:
-            debug_print(f"Failed to verify successful login: {e}")
-            return False

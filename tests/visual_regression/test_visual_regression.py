@@ -27,7 +27,7 @@ Usage Examples:
     # Run just the failing test to see diff generation
     pytest tests/visual_regression/test_visual_regression.py::test_homepage_visual_major_change_should_fail -v
 
-Author: Playwright AI Test Framework
+Author: PMAC
 Site: The Internet (https://the-internet.herokuapp.com)
 Date: [2025-09-03]
 ===============================================================================

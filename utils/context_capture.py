@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Dict, Any, List
 import allure
 from playwright.sync_api import Page
-from config.artifact_paths import ALLURE_SCREENSHOT_DIR
+from config.artifact_paths import SCREENSHOT_DIR
 
-DEFAULT_SCREENSHOT_DIR = ALLURE_SCREENSHOT_DIR
+DEFAULT_SCREENSHOT_DIR = SCREENSHOT_DIR
 
 class ContextCapture:
     """Unified context capture with single screenshot method."""

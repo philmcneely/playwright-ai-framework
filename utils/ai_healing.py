@@ -38,6 +38,7 @@ import subprocess
 import time
 import shutil
 import ollama
+from config.artifact_paths import AI_HEALING_REPORT_DIR
 
 from utils.debug import debug_print
 import re
@@ -402,7 +403,7 @@ class OllamaAIHealingService:
         Returns:
             None
         """
-        healing_dir = Path("test_artifacts/ai/ai_healing_reports")
+        healing_dir = AI_HEALING_REPORT_DIR
         healing_dir.mkdir(exist_ok=True)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

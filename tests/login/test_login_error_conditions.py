@@ -9,138 +9,157 @@ validation, error handling, and user experience functionality.
 Features:
     ✓ Tests for invalid credentials, empty fields, and malformed inputs
     ✓ Verifies proper error messages and user feedback for various scenarios
-    ✓ Tests account blocking functionality after multiple failed attempts
-    ✓ Validates password masking/unmasking functionality
-    ✓ Tests email editing and correction workflows
+    ✓ Tests multiple login entry points (direct and via navigation)
+    ✓ Validates form field behavior and interactions
     ✓ Comprehensive input validation and error state testing
 
 Error Condition Categories:
     • Invalid Credentials: Testing wrong username/password combinations
     • Empty Fields: Validation of required field enforcement
-    • Malformed Inputs: Testing with invalid email formats and special characters
-    • Account Security: Rate limiting and brute force protection testing
-    • User Experience: Error message clarity and form interaction testing
+    • Multiple Entry Points: Direct login vs home page navigation
+    • Form Interactions: Field clearing, input validation
+    • User Experience: Error message clarity and form behavior
 
 Usage Example:
     pytest tests/login/test_login_error_conditions.py
 
 Conventions:
     - Each test is marked as async and uses Playwright's async API
-    - Test data uses test_data module for valid credentials and inline data for invalid cases
+    - Test data uses test_data module for valid/invalid credential combinations
     - Comments explain the purpose and steps of each test
     - Assertions check for expected error messages and UI behavior
 
-Author: Playwright AI Test Framework
+Author: PMAC
 Site: The Internet (https://the-internet.herokuapp.com)
 Date: [2025-09-03]
 ===============================================================================
 """
 
 import pytest
-from pages.app import App
-from test_data.test_data import INVALID_USERS, EXPECTED_MESSAGES
+from data.test_data import INVALID_USERS, EXPECTED_MESSAGES
 from utils.decorators.screenshot_decorator import screenshot_on_failure
 from utils.debug import debug_print
 
 
 # ------------------------------------------------------------------------------
-# Test: Valid Account with Invalid Password
+# Test: Invalid Username (Direct Login)
 # ------------------------------------------------------------------------------
 
 @screenshot_on_failure
 @pytest.mark.login
-@pytest.mark.compatibility
 @pytest.mark.asyncio
-async def test_login_invalid_password(app):
+async def test_login_invalid_username_direct(app):
     """
-    Test login with a valid email but incorrect password.
+    Test login with invalid username via direct navigation to login page.
     Verifies that the appropriate error message is displayed.
     """
-    await app.login_page.load_login_direct()
-    await app.login_page.enter_email(PERSONAS["user"]["email"])
-    await app.login_page.click_continue()
-    await app.login_page.enter_password("wrongpassword")
-    await app.login_page.click_continue()
-    # Assert error message for incorrect password is visible
-    assert await app.login_page.error_message_email_or_password_incorrect.is_visible()
-    assert app.login_page.error_message_password_incorrect_text == await app.login_page.get_error_message_password_incorrect_text()
-    assert await app.login_page.has_email_or_password_incorrect_error_icon()
+    debug_print("Testing invalid username via direct login")
+    
+    # Navigate directly to login page
+    await app.login_page.navigate()
+    
+    # Attempt login with invalid username
+    await app.login_page.login(
+        INVALID_USERS["invalid_username"]["username"],
+        INVALID_USERS["invalid_username"]["password"]
+    )
+    
+    # Should remain on login page
+    assert await app.login_page.is_on_login_page()
+    
+    # Verify error message
+    flash_text = await app.login_page.get_flash_message()
+    assert EXPECTED_MESSAGES["invalid_username"] in flash_text
+    
+    debug_print("Invalid username test (direct) completed")
+
 
 # ------------------------------------------------------------------------------
-# Test: Invalid Email Account
+# Test: Invalid Username (Home Navigation)
 # ------------------------------------------------------------------------------
 
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.asyncio
-async def test_login_invalid_email(app):
+async def test_login_invalid_username_via_home(app):
     """
-    Test login with an invalid/non-existent email address.
+    Test login with invalid username via home page navigation.
+    Verifies navigation flow and error handling.
+    """
+    debug_print("Testing invalid username via home navigation")
+    
+    # Navigate to home page first, then to login
+    await app.page.goto("https://the-internet.herokuapp.com")
+    await app.page.click('a[href="/login"]')
+    
+    # Verify we're on login page
+    assert await app.login_page.is_on_login_page()
+    
+    # Attempt login with invalid username
+    await app.login_page.login(
+        INVALID_USERS["invalid_username"]["username"],
+        INVALID_USERS["invalid_username"]["password"]
+    )
+    
+    # Verify error message
+    flash_text = await app.login_page.get_flash_message()
+    assert EXPECTED_MESSAGES["invalid_username"] in flash_text
+    
+    debug_print("Invalid username test (via home) completed")
+
+
+# ------------------------------------------------------------------------------
+# Test: Invalid Password (Direct Login)
+# ------------------------------------------------------------------------------
+
+@screenshot_on_failure
+@pytest.mark.login
+@pytest.mark.asyncio
+async def test_login_invalid_password_direct(app):
+    """
+    Test login with valid username but incorrect password.
     Verifies that the appropriate error message is displayed.
     """
-    await app.login_page.load_login_direct()
-    await app.login_page.enter_email("dadfdf@gmail.com")
-    await app.login_page.click_continue()
-    await app.login_page.enter_password("wrongpassword")
-    await app.login_page.click_continue()
-    # Assert error message for incorrect email is visible
-    assert await app.login_page.error_message_email_or_password_incorrect.is_visible()
-    expected_message = app.login_page.error_message_email_incorrect_text
-    actual_message = await app.login_page.get_error_message_email_incorrect_text()
-    assert expected_message == actual_message
-    assert await app.login_page.has_email_or_password_incorrect_error_icon()
-
-# ------------------------------------------------------------------------------
-# Test: Account Blocking After Multiple Failed Attempts
-# ------------------------------------------------------------------------------
-
-@screenshot_on_failure
-@pytest.mark.danger
-@pytest.mark.login
-@pytest.mark.asyncio
-async def test_account_blocked_after_multiple_attempts(app):
-    """
-    Test that an account gets blocked after multiple failed login attempts.
-    This test is marked as 'danger' as it can lock out the test account.
-    """
-    # Simulate multiple failed login attempts (assuming 10+ attempts trigger the block) #hrmmmmm blocked myslef but this 10 doesnt seem to work, need to fix?
-    for _ in range(11):
-        await app.login_page.load_login_direct()
-        await app.login_page.enter_email(PERSONAS["user"]["email"])
-        await app.login_page.click_continue()
-        await app.login_page.enter_password("wrongpassword")
-        await app.login_page.click_continue()
+    debug_print("Testing invalid password via direct login")
     
-    # Wait for blocked account alert to appear
-    await app.login_page.blocked_account_alert.wait_for(state="visible", timeout=5000) #need to mabe navigate back to main login?
+    await app.login_page.navigate()
+    await app.login_page.login(
+        INVALID_USERS["invalid_password"]["username"],
+        INVALID_USERS["invalid_password"]["password"]
+    )
     
-    # Verify account is blocked and message is correct
-    assert await app.login_page.is_account_blocked()
-    expected_message = app.login_page.blocked_account_alert_text
-    actual_message = await app.login_page.get_blocked_account_text()
-    assert expected_message == actual_message
+    # Should remain on login page
+    assert await app.login_page.is_on_login_page()
+    
+    # Verify error message
+    flash_text = await app.login_page.get_flash_message()
+    assert EXPECTED_MESSAGES["invalid_password"] in flash_text
+    
+    debug_print("Invalid password test completed")
+
 
 # ------------------------------------------------------------------------------
-# Test: Empty Email Field
+# Test: Empty Username Field
 # ------------------------------------------------------------------------------
 
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.asyncio
-async def test_login_empty_email(app):
+async def test_login_empty_username(app):
     """
-    Test login attempt with an empty email field.
-    Verifies that the required field error message is displayed.
+    Test login attempt with an empty username field.
+    Verifies that the form handles empty username appropriately.
     """
-    await app.login_page.load_login_direct()
-    await app.login_page.enter_email("")
-    await app.login_page.click_continue()
-    # Assert error message for required email field is visible
-    assert await app.login_page.error_message_email_required.is_visible()
-    expected_message = app.login_page.error_message_email_required_text
-    actual_message = await app.login_page.get_error_message_email_required_text()
-    assert expected_message == actual_message
-    assert await app.login_page.has_email_required_error_icon()
+    debug_print("Testing empty username field")
+    
+    await app.login_page.navigate()
+    await app.login_page.login("", "somepassword")
+    
+    # Should remain on login page
+    assert await app.login_page.is_on_login_page()
+    
+    debug_print("Empty username test completed")
+
 
 # ------------------------------------------------------------------------------
 # Test: Empty Password Field
@@ -151,157 +170,176 @@ async def test_login_empty_email(app):
 @pytest.mark.asyncio
 async def test_login_empty_password(app):
     """
-    Test login attempt with a valid email but empty password field.
-    Verifies that the required field error message is displayed.
+    Test login attempt with empty password field.
+    Verifies that the form handles empty password appropriately.
     """
-    await app.login_page.load_login_direct()
-    await app.login_page.enter_email("valid@email.com")
-    await app.login_page.click_continue()
-    await app.login_page.enter_password("")
-    await app.login_page.click_continue()
-    # Assert error message for required password field is visible
-    assert await app.login_page.error_message_password_required.is_visible()
-    expected_message = app.login_page.error_message_password_required_text
-    actual_message = await app.login_page.get_error_message_password_required_text()
-    assert expected_message == actual_message
-    assert await app.login_page.has_password_required_error_icon()
+    debug_print("Testing empty password field")
+    
+    await app.login_page.navigate()
+    await app.login_page.login("someusername", "")
+    
+    # Should remain on login page
+    assert await app.login_page.is_on_login_page()
+    
+    debug_print("Empty password test completed")
+
 
 # ------------------------------------------------------------------------------
-# Test: Malformed Email Entry
+# Test: Both Fields Empty
 # ------------------------------------------------------------------------------
 
 @screenshot_on_failure
 @pytest.mark.login
-@pytest.mark.compatibility
 @pytest.mark.asyncio
-async def test_login_malformed_email_just_text(app):
+async def test_login_empty_credentials(app):
     """
-    Test login with malformed email (just text without @ or domain), numbers, 
-    single number, a single special character, spaces and unicode.
-    Verifies that the email validation error is displayed and password field is not shown.
-    I will leave seperate tests for too long a string.
+    Test login attempt with both username and password empty.
+    Verifies that the form handles completely empty submission.
     """
-    email_payloads = [
-        "asdaqdasf",
-        "12345",
-        "1",
-        "@",
-        "dadfdf_)_)&*^*(^)*&%%&^I$%$^#^$$@gmail.com",
-        "        ",
-        "用户名"
+    debug_print("Testing both fields empty")
+    
+    await app.login_page.navigate()
+    await app.login_page.login("", "")
+    
+    # Should remain on login page
+    assert await app.login_page.is_on_login_page()
+    
+    debug_print("Empty credentials test completed")
+
+
+# ------------------------------------------------------------------------------
+# Test: Form Field Interactions
+# ------------------------------------------------------------------------------
+
+@screenshot_on_failure
+@pytest.mark.login
+@pytest.mark.asyncio
+async def test_form_field_clearing_and_retry(app):
+    """
+    Test workflow of entering invalid data, clearing, and retrying.
+    Verifies form field manipulation and retry behavior.
+    """
+    debug_print("Testing form field clearing and retry")
+    
+    await app.login_page.navigate()
+    
+    # Enter invalid data first
+    await app.login_page.enter_username("invalid_user")
+    await app.login_page.enter_password("invalid_pass")
+    
+    # Verify data was entered
+    username_value = await app.login_page.get_username_value()
+    assert username_value == "invalid_user"
+    
+    # Clear fields
+    await app.login_page.clear_username()
+    await app.login_page.clear_password()
+    
+    # Verify fields are cleared
+    username_value = await app.login_page.get_username_value()
+    assert username_value == ""
+    
+    # Now try with valid credentials
+    await app.login_page.login_with_demo_user()
+    
+    # Should succeed and navigate to secure area
+    assert await app.secure_page.is_on_secure_page()
+    
+    debug_print("Form field clearing and retry test completed")
+
+
+# ------------------------------------------------------------------------------
+# Test: Special Characters in Username
+# ------------------------------------------------------------------------------
+
+@screenshot_on_failure
+@pytest.mark.login
+@pytest.mark.asyncio
+async def test_login_special_characters_username(app):
+    """
+    Test login with special characters in username field.
+    Verifies that special characters are handled appropriately.
+    """
+    debug_print("Testing special characters in username")
+    
+    await app.login_page.navigate()
+    
+    special_usernames = [
+        "user@domain.com",
+        "user!@#$%",
+        "用户名",  # Unicode characters
+        "user with spaces",
+        "user'with\"quotes"
     ]
-    for email_payload in email_payloads:
-        await app.login_page.load_login_direct()
-        await app.login_page.enter_email(email_payload)
-        await app.login_page.click_continue()
-        # Assert that the invalid email error message is visible
-        assert not await app.login_page.password_textbox.is_visible()
-        assert await app.login_page.error_message_email_invalid.is_visible()
-        expected_message = app.login_page.error_message_email_invalid_text
-        actual_message = await app.login_page.get_error_message_email_invalid_text()
-        assert expected_message == actual_message
-        assert await app.login_page.has_email_invalid_error_icon()
+    
+    for username in special_usernames:
+        await app.login_page.enter_username(username)
+        await app.login_page.enter_password("somepassword")
+        await app.login_page.click_element(app.login_page.login_button)
+        
+        # Should remain on login page for all invalid usernames
+        assert await app.login_page.is_on_login_page()
+        
+        # Clear for next iteration
+        await app.login_page.clear_username()
+        await app.login_page.clear_password()
+    
+    debug_print("Special characters username test completed")
+
 
 # ------------------------------------------------------------------------------
-# Test: Edit Invalid Email to Valid Email
-# ------------------------------------------------------------------------------
-
-@screenshot_on_failure
-@pytest.mark.login
-@pytest.mark.asyncio
-async def test_login_edit_invalid_account(app):
-    """
-    Test the workflow of entering an invalid email, then editing it to a valid one
-    and completing the login process successfully.
-    """
-    await app.login_page.load_login_direct()
-    await app.login_page.enter_email("valid@email.com")
-    await app.login_page.click_continue()
-    # Verify password field is visible for the initial email
-    assert await app.login_page.password_textbox.is_visible()
-    # Edit the email to a valid account
-    await app.login_page.edit_email_link.click()
-    await app.login_page.enter_email(PERSONAS["user"]["email"])
-    await app.login_page.click_continue()
-    await app.login_page.enter_password(PERSONAS["user"]["password"])
-    await app.login_page.click_continue()
-    await app.dashboard_page.verify_user_profile_info()
-
-# ------------------------------------------------------------------------------
-# Test: Email with Too Many Characters (300+)
+# Test: Very Long Input Strings
 # ------------------------------------------------------------------------------
 
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.asyncio
-async def test_login_email_too_long(app):
+async def test_login_very_long_inputs(app):
     """
-    Test login with an email that exceeds the maximum character limit (300 characters).
-    Verifies that the email validation error is displayed.
+    Test login with very long username and password strings.
+    Verifies that the form handles excessive input lengths gracefully.
     """
-    await app.login_page.load_login_direct()
-    too_long_email_string = "s0F9OjxlA1g2aCxKK9xV2FBvbprskrqaWI8y64DqnVL7yn2rbfoCKod5F8LcqQiMXLhlrn5sMlU87vgr6F4wG3q1FX4dfCcRotpjRx2yQcJsyIpSaUqXraUPmO4K4cag96wREf3zmqcgrZ7ZeETsIFguyR9NG9KTfcX54eox4CoBHKTepsE8OPZaHpFE9tmtyjGWb69PtWcvQp28D6WslyI2sLFV97lQSQyLgdj7LBt9F4BhdW5Uw9fqSSs6bCDTatKbej6qhyXgkftxPMkyPaixRda0uJ5UZbKyASfnxQO7"
-    await app.login_page.enter_email(too_long_email_string)
-    await app.login_page.click_continue()
-    # Assert email validation error is shown
-    assert await app.login_page.error_message_email_invalid.is_visible()
-    expected_message = app.login_page.error_message_email_invalid_text
-    actual_message = await app.login_page.get_error_message_email_invalid_text()
-    assert expected_message == actual_message
-    assert await app.login_page.has_email_invalid_error_icon()
+    debug_print("Testing very long input strings")
+    
+    await app.login_page.navigate()
+    
+    # Create very long strings
+    long_username = "a" * 500
+    long_password = "b" * 500
+    
+    await app.login_page.login(long_username, long_password)
+    
+    # Should remain on login page
+    assert await app.login_page.is_on_login_page()
+    
+    debug_print("Very long inputs test completed")
+
 
 # ------------------------------------------------------------------------------
-# Test: Password with Too Many Characters (300+)
-# ------------------------------------------------------------------------------
-
-@screenshot_on_failure
-@pytest.mark.login
-@pytest.mark.asyncio
-async def test_login_password_too_long(app):
-    """
-    Test login with a password that exceeds the maximum character limit (300 characters).
-    Verifies that the login fails with appropriate error message.
-    """
-    await app.login_page.load_login_direct()
-    too_long_password_string = "s0F9OjxlA1g2aCxKK9xV2FBvbprskrqaWI8y64DqnVL7yn2rbfoCKod5F8LcqQiMXLhlrn5sMlU87vgr6F4wG3q1FX4dfCcRotpjRx2yQcJsyIpSaUqXraUPmO4K4cag96wREf3zmqcgrZ7ZeETsIFguyR9NG9KTfcX54eox4CoBHKTepsE8OPZaHpFE9tmtyjGWb69PtWcvQp28D6WslyI2sLFV97lQSQyLgdj7LBt9F4BhdW5Uw9fqSSs6bCDTatKbej6qhyXgkftxPMkyPaixRda0uJ5UZbKyASfnxQO7"
-    await app.login_page.enter_email("valid@gmail.com")
-    await app.login_page.click_continue()
-    await app.login_page.enter_password(too_long_password_string)
-    await app.login_page.click_continue()
-    # Assert password error is shown
-    assert await app.login_page.error_message_email_or_password_incorrect.is_visible()
-    assert app.login_page.error_message_email_incorrect_text == await app.login_page.get_error_message_password_incorrect_text()
-    assert await app.login_page.has_email_or_password_incorrect_error_icon()
-
-# ------------------------------------------------------------------------------
-# Test: Password Masking/Unmasking Functionality
+# Test: Multiple Failed Attempts
 # ------------------------------------------------------------------------------
 
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.asyncio
-async def test_password_shown_when_button_clicked(app):
+async def test_multiple_failed_login_attempts(app):
     """
-    Test the password show/hide functionality to ensure passwords are properly masked
-    and can be revealed when the show password button is clicked.
+    Test multiple consecutive failed login attempts.
+    Verifies that the system handles repeated failures appropriately.
     """
-    await app.login_page.load_login_direct()
-    await app.login_page.enter_email(PERSONAS["user"]["email"])
-    await app.login_page.click_continue()
-    await app.login_page.enter_password("supersecret")
-
-    # Ensure password is hidden by default (type="password")
-    input_type = await app.login_page.password_textbox.get_attribute("type")
-    assert input_type == "password"
-
-    # Click the show password button to reveal the password
-    await app.login_page.show_password_button.click()
-    input_type_after = await app.login_page.password_textbox.get_attribute("type")
-    assert input_type_after == "text"
-    password_text = await app.login_page.get_password_text()
-    assert password_text == "supersecret"
-
-    # Click again to hide the password
-    await app.login_page.show_password_button.click()
-    input_type_hidden = await app.login_page.password_textbox.get_attribute("type")
-    assert input_type_hidden == "password"
+    debug_print("Testing multiple failed login attempts")
+    
+    await app.login_page.navigate()
+    
+    # Attempt multiple failed logins
+    for i in range(3):
+        await app.login_page.login(f"invalid_user_{i}", f"invalid_pass_{i}")
+        
+        # Should remain on login page each time
+        assert await app.login_page.is_on_login_page()
+        
+        # May have flash message
+        flash_text = await app.login_page.get_flash_message()
+        debug_print(f"Attempt {i+1}: Flash message = {flash_text}")
+    
+    debug_print("Multiple failed attempts test completed")

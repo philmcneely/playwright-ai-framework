@@ -1,14 +1,17 @@
 name: Playwright Tests
+
 on:
   push:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
     types: [opened, reopened, synchronize]
+
 permissions:
   contents: read
   issues: write
   pull-requests: write
+
 jobs:
   setup:
     runs-on: ubuntu-latest
@@ -40,20 +43,26 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements_with_versions.txt
+
       - name: Install Browserstack SDK
         run: pip install browserstack-local
+
       - name: Install Ollama CLI
         run: |
           curl -fsSL https://ollama.com/install.sh | sh
           pip install ollama
+
       # - name: Start Ollama service
       #   run: |
       #     nohup ollama serve > ollama.log 2>&1 &
       #     sleep 10  # wait for service to start
+
       # - name: Pull Ollama model from secret
       #   run: ollama pull ${{ secrets.OLLAMA_MODEL }}
+
       # - name: List Ollama models
       #   run: ollama list
+
       - name: Cache Playwright browsers
         uses: actions/cache@v3
         id: cache-browsers
@@ -66,23 +75,37 @@ jobs:
       - name: Install Playwright browsers
         if: steps.cache-browsers.outputs.cache-hit != 'true'
         run: python -m playwright install --with-deps
+
   smoke:
     runs-on: ubuntu-latest
     needs: setup
     env:
-      # Updated for The Internet test site - only site-specific changes
-      USER_DEMO_USERNAME: ${{ secrets.USER_DEMO_USERNAME || 'tomsmith' }}
-      USER_DEMO_PASSWORD: ${{ secrets.USER_DEMO_PASSWORD || 'SuperSecretPassword!' }}
-      USER_ADMIN_USERNAME: ${{ secrets.USER_ADMIN_USERNAME || 'admin' }}
-      USER_ADMIN_PASSWORD: ${{ secrets.USER_ADMIN_PASSWORD || 'admin123' }}
-      BASE_URL: ${{ secrets.BASE_URL || 'https://the-internet.herokuapp.com' }}
-      API_LOGIN_URL: ${{ secrets.API_LOGIN_URL || 'https://the-internet.herokuapp.com/login' }}
-      # Preserved ALL original AI healing configuration
+      USER_PM_EMAIL: ${{ secrets.USER_PM_EMAIL }}
+      USER_PM_PASSWORD: ${{ secrets.USER_PM_PASSWORD }}
+      USER_PM_ROLE: ${{ secrets.USER_PM_ROLE }}
+      USER_PM_FIRST: ${{ secrets.USER_PM_FIRST }}
+      USER_PM_LAST: ${{ secrets.USER_PM_LAST }}
+      USER_PM_INITIALS: ${{ secrets.USER_PM_INITIALS }}
+      USER_ADMIN_EMAIL: ${{ secrets.USER_ADMIN_EMAIL }}
+      USER_ADMIN_PASSWORD: ${{ secrets.USER_ADMIN_PASSWORD }}
+      USER_ADMIN_ROLE: ${{ secrets.USER_ADMIN_ROLE }}
+      USER_ADMIN_FIRST: ${{ secrets.USER_ADMIN_FIRST }}
+      USER_ADMIN_LAST: ${{ secrets.USER_ADMIN_LAST }}
+      USER_ADMIN_INITIALS: ${{ secrets.USER_ADMIN_INITIALS }}
+      USER_COACH_EMAIL: ${{ secrets.USER_COACH_EMAIL }}
+      USER_COACH_PASSWORD: ${{ secrets.USER_COACH_PASSWORD }}
+      USER_COACH_ROLE: ${{ secrets.USER_COACH_ROLE }}
+      USER_COACH_FIRST: ${{ secrets.USER_COACH_FIRST }}
+      USER_COACH_LAST: ${{ secrets.USER_COACH_LAST }}
+      USER_COACH_INITIALS: ${{ secrets.USER_COACH_INITIALS }}
+      BASE_URL: ${{ secrets.BASE_URL }}
+      API_LOGIN_URL: ${{ secrets.API_LOGIN_URL }}
       AI_HEALING_ENABLED: ${{ secrets.AI_HEALING_ENABLED }}  
       AI_HEALING_ENDPOINT: ${{ secrets.AI_HEALING_ENDPOINT }}
       AI_HEALING_CONFIDENCE: ${{ secrets.AI_HEALING_CONFIDENCE }}
       OLLAMA_MODEL: ${{ secrets.OLLAMA_MODEL }}
       OLLAMA_HOST: ${{ secrets.OLLAMA_HOST }}
+
     steps:
       - uses: actions/checkout@v4
       
@@ -103,18 +126,23 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements_with_versions.txt
+
       - name: Install Browserstack SDK
         run: pip install browserstack-local
+
       - name: Install Ollama CLI
         run: |
           curl -fsSL https://ollama.com/install.sh | sh
           pip install ollama
+
       # - name: Start Ollama service
       #   run: |
       #     nohup ollama serve > ollama.log 2>&1 &
       #     sleep 10  # wait for service to start
+
       # - name: Pull Ollama model from secret
       #   run: ollama pull ${{ secrets.OLLAMA_MODEL }}
+
       # - name: List Ollama models
       #   run: ollama list
       
@@ -135,6 +163,7 @@ jobs:
           sudo mv allure-2.27.0 /opt/allure
           sudo ln -s /opt/allure/bin/allure /usr/bin/allure
           allure --version
+
       - name: Run chromium smoke tests
         run: |
           mkdir -p test_artifacts/allure/allure-report
@@ -148,24 +177,28 @@ jobs:
           mkdir -p test_artifacts/allure/allure-results
           mkdir -p test_artifacts/allure/screenshots
           AI_HEALING_ENABLED=false BROWSER=firefox HEADLESS=true pytest --alluredir=test_artifacts/allure/allure-results --capture=tee-sys --reruns 2 --reruns-delay 5 -m smoke -n auto
-      # Some kind of GHA error running webkit, defer for now - common fixes didn't work
+
+      # Some kind of GHA error runnign webkit, defer for now - common fixes didnt work
       # - name: Run webkit smoke tests
       #   run: |
       #     mkdir -p test_artifacts/allure/allure-report
       #     mkdir -p test_artifacts/allure/allure-results
       #     mkdir -p test_artifacts/allure/screenshots
       #     BROWSER=webkit HEADLESS=true pytest --alluredir=test_artifacts/allure/allure-results --capture=tee-sys --reruns 2 --reruns-delay 5 -m smoke -n auto
+
       - name: Generate Test Results
         if: always()
         run: |
           allure generate test_artifacts/allure/allure-results -o test_artifacts/allure/allure-report --clean --single-file
           mv test_artifacts/allure/allure-report/index.html test_artifacts/allure/allure-report/index_smoke.html
+
       - name: Upload test report & screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: index_smoke.html
           path: test_artifacts/allure/allure-report
+
       - name: Comment PR with test summary
         if: github.event.pull_request.head.repo.full_name == github.repository
         uses: actions/github-script@v7
@@ -184,24 +217,38 @@ jobs:
             })
         env:
           JOB_STATUS: ${{ job.status }}
+
   full:
     runs-on: ubuntu-latest
     needs: [setup, smoke]
     timeout-minutes: 60
     env:
-      # Updated for The Internet test site - only site-specific changes
-      USER_DEMO_USERNAME: ${{ secrets.USER_DEMO_USERNAME || 'tomsmith' }}
-      USER_DEMO_PASSWORD: ${{ secrets.USER_DEMO_PASSWORD || 'SuperSecretPassword!' }}
-      USER_ADMIN_USERNAME: ${{ secrets.USER_ADMIN_USERNAME || 'admin' }}
-      USER_ADMIN_PASSWORD: ${{ secrets.USER_ADMIN_PASSWORD || 'admin123' }}
-      BASE_URL: ${{ secrets.BASE_URL || 'https://the-internet.herokuapp.com' }}
-      API_LOGIN_URL: ${{ secrets.API_LOGIN_URL || 'https://the-internet.herokuapp.com/login' }}
-      # Preserved ALL original AI healing configuration
+      USER_PM_EMAIL: ${{ secrets.USER_PM_EMAIL }}
+      USER_PM_PASSWORD: ${{ secrets.USER_PM_PASSWORD }}
+      USER_PM_ROLE: ${{ secrets.USER_PM_ROLE }}
+      USER_PM_FIRST: ${{ secrets.USER_PM_FIRST }}
+      USER_PM_LAST: ${{ secrets.USER_PM_LAST }}
+      USER_PM_INITIALS: ${{ secrets.USER_PM_INITIALS }}
+      USER_ADMIN_EMAIL: ${{ secrets.USER_ADMIN_EMAIL }}
+      USER_ADMIN_PASSWORD: ${{ secrets.USER_ADMIN_PASSWORD }}
+      USER_ADMIN_ROLE: ${{ secrets.USER_ADMIN_ROLE }}
+      USER_ADMIN_FIRST: ${{ secrets.USER_ADMIN_FIRST }}
+      USER_ADMIN_LAST: ${{ secrets.USER_ADMIN_LAST }}
+      USER_ADMIN_INITIALS: ${{ secrets.USER_ADMIN_INITIALS }}
+      USER_COACH_EMAIL: ${{ secrets.USER_COACH_EMAIL }}
+      USER_COACH_PASSWORD: ${{ secrets.USER_COACH_PASSWORD }}
+      USER_COACH_ROLE: ${{ secrets.USER_COACH_ROLE }}
+      USER_COACH_FIRST: ${{ secrets.USER_COACH_FIRST }}
+      USER_COACH_LAST: ${{ secrets.USER_COACH_LAST }}
+      USER_COACH_INITIALS: ${{ secrets.USER_COACH_INITIALS }}
+      BASE_URL: ${{ secrets.BASE_URL }}
+      API_LOGIN_URL: ${{ secrets.API_LOGIN_URL }}
       AI_HEALING_ENABLED: ${{ secrets.AI_HEALING_ENABLED }}  
       AI_HEALING_ENDPOINT: ${{ secrets.AI_HEALING_ENDPOINT }}
       AI_HEALING_CONFIDENCE: ${{ secrets.AI_HEALING_CONFIDENCE }}
       OLLAMA_MODEL: ${{ secrets.OLLAMA_MODEL }}
       OLLAMA_HOST: ${{ secrets.OLLAMA_HOST }}
+
     steps:
       - uses: actions/checkout@v4
       
@@ -222,18 +269,23 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements_with_versions.txt
+
       - name: Install Browserstack SDK
         run: pip install browserstack-local
+
       - name: Install Ollama CLI
         run: |
           curl -fsSL https://ollama.com/install.sh | sh
           pip install ollama
+
       # - name: Start Ollama service
       #   run: |
       #     nohup ollama serve > ollama.log 2>&1 &
       #     sleep 10  # wait for service to start
+
       # - name: Pull Ollama model from secret
       #   run: ollama pull ${{ secrets.OLLAMA_MODEL }}
+
       # - name: List Ollama models
       #   run: ollama list
       
@@ -254,23 +306,27 @@ jobs:
           sudo mv allure-2.27.0 /opt/allure
           sudo ln -s /opt/allure/bin/allure /usr/bin/allure
           allure --version
-      - name: Run chromium comprehensive test suite
+
+      - name: Run chromium full test suite
         run: |
           mkdir -p test_artifacts/allure/allure-report
           mkdir -p test_artifacts/allure/allure-results
           mkdir -p test_artifacts/allure/screenshots
-          AI_HEALING_ENABLED=false HEADLESS=true pytest --alluredir=test_artifacts/allure/allure-results --capture=tee-sys --reruns 2 --reruns-delay 5 -m "login or regression or performance or visual or ai_healing" -n auto
+          AI_HEALING_ENABLED=false HEADLESS=true pytest --alluredir=test_artifacts/allure/allure-results --capture=tee-sys --reruns 2 --reruns-delay 5 -m  "login and not (smoke or danger)" -n auto
+
       - name: Generate Test Results
         if: always()
         run: |
           allure generate test_artifacts/allure/allure-results -o test_artifacts/allure/allure-report --clean --single-file
           mv test_artifacts/allure/allure-report/index.html test_artifacts/allure/allure-report/index_full_chromium.html
+
       - name: Upload test report & screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: index_full_chromium.html
           path: test_artifacts/allure/allure-report
+
       - name: Comment PR with test summary
         if: github.event.pull_request.head.repo.full_name == github.repository
         uses: actions/github-script@v7
@@ -279,8 +335,8 @@ jobs:
             const fs = require('fs');
             const status = process.env.JOB_STATUS || 'unknown';
             const summary = status === 'success'
-              ? '✅ All chromium comprehensive tests passed! [View report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})'
-              : '❌ Some chromium comprehensive tests failed. [View report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})';
+              ? '✅ All chromium login tests passed! [View report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})'
+              : '❌ Some chromium login tests failed. [View report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})';
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
@@ -289,25 +345,29 @@ jobs:
             })
         env:
           JOB_STATUS: ${{ job.status }}
+
       # Originally was going to run just compatibility tests, but decided for now, 
-      # with small suite to run full.  this should be broken out to a separate job likely in future
-      - name: Run firefox comprehensive tests
+      # with small suite to run full.  this should be broken out to a seperate job likely in future
+      - name: Run firefox full tests
         run: |
           mkdir -p test_artifacts/allure/allure-report
           mkdir -p test_artifacts/allure/allure-results
           mkdir -p test_artifacts/allure/screenshots
-          AI_HEALING_ENABLED=false BROWSER=firefox HEADLESS=true pytest --alluredir=test_artifacts/allure/allure-results --capture=tee-sys --reruns 2 --reruns-delay 5 -m "login or regression or performance or visual or ai_healing" -n auto
+          AI_HEALING_ENABLED=false BROWSER=firefox HEADLESS=true pytest --alluredir=test_artifacts/allure/allure-results --capture=tee-sys --reruns 2 --reruns-delay 5 -m "login and not (smoke or danger)" -n auto
+
       - name: Generate Test Results
         if: always()
         run: |
           allure generate test_artifacts/allure/allure-results -o test_artifacts/allure/allure-report --clean --single-file
           mv test_artifacts/allure/allure-report/index.html test_artifacts/allure/allure-report/index_full_firefox.html
+
       - name: Upload test report & screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: index_full_firefox.html
           path: test_artifacts/allure/allure-report
+
       - name: Comment PR with test summary
         if: github.event.pull_request.head.repo.full_name == github.repository
         uses: actions/github-script@v7
@@ -316,8 +376,8 @@ jobs:
             const fs = require('fs');
             const status = process.env.JOB_STATUS || 'unknown';
             const summary = status === 'success'
-              ? '✅ All firefox comprehensive tests passed! [View report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})'
-              : '❌ Some firefox comprehensive tests failed. [View report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})';
+              ? '✅ All firefox login tests passed! [View report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})'
+              : '❌ Some firefox login tests failed. [View report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})';
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,

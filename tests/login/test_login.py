@@ -23,7 +23,7 @@ Conventions:
     - Comments explain the purpose and steps of each test
     - Tests handle both success and failure scenarios properly
 
-Author: Playwright AI Test Framework
+Author: PMAC
 Site: The Internet (https://the-internet.herokuapp.com)
 Date: [2025-09-03]
 ===============================================================================
@@ -31,9 +31,51 @@ Date: [2025-09-03]
 
 import pytest
 from pages.app import App
-from test_data.test_data import INVALID_USERS, EXPECTED_MESSAGES
+from data.test_data import INVALID_USERS, EXPECTED_MESSAGES
 from utils.decorators.screenshot_decorator import screenshot_on_failure
 from utils.debug import debug_print
+
+
+# ------------------------------------------------------------------------------
+# Test: Loads page and fails to generate screenshot
+# ------------------------------------------------------------------------------
+
+@screenshot_on_failure
+@pytest.mark.fail
+@pytest.mark.asyncio
+async def test_login_direct_fail(page):
+    """
+    Test direct login navigation and fails to trigger screenshot
+    """
+    app = App(page)
+    await app.login_page.navigate()
+    assert False, "This will trigger a screenshot"
+
+
+# ------------------------------------------------------------------------------
+# Test: Direct Login with Valid Credentials - fails on purpose (AI Healing)
+# ------------------------------------------------------------------------------
+
+@pytest.mark.trigger_ai_healing
+@screenshot_on_failure
+@pytest.mark.compatibility
+@pytest.mark.asyncio
+async def test_login_direct_valid_credentials_ai_healing(page):
+    """
+    Test direct login navigation with valid credentials - fails on purpose to trigger AI healing.
+    This test uses intentionally broken method names to test AI healing functionality.
+    """
+    app = App(page)
+    
+    await app.login_page.navigate()
+    await app.login_page.enter_username("tomsmith")
+    # Intentionally broken method name to trigger AI healing
+    await app.login_page.enter_passwordx("SuperSecretPassword!")  # This should fail and trigger healing
+    await app.login_page.click_login()
+    
+    # Verify successful login
+    assert await app.secure_page.is_on_secure_page()
+    debug_print("AI healing test completed successfully")
 
 
 # ------------------------------------------------------------------------------
@@ -52,16 +94,15 @@ async def test_login_direct_valid_credentials(page):
     debug_print("Starting valid login test")
     app = App(page)
     
-    await app.login.navigate()
-    await app.login.login_with_demo_user()
+    await app.login_page.navigate()
+    await app.login_page.login_with_demo_user()
     
     # Verify successful login by checking secure page
-    assert await app.secure.is_on_secure_page()
-    
-    # Verify flash message indicates success
-    flash_text = await app.secure.get_flash_message()
+    assert await app.secure_page.is_on_secure_page()
+
+    # Verify success message is displayed
+    flash_text = await app.secure_page.get_flash_message_text()
     assert "You logged into a secure area!" in flash_text
-    
     debug_print("Valid login test completed successfully")
 
 
@@ -71,6 +112,7 @@ async def test_login_direct_valid_credentials(page):
 
 @screenshot_on_failure
 @pytest.mark.login
+@pytest.mark.smoke
 @pytest.mark.asyncio
 async def test_login_invalid_username(page):
     """
@@ -80,17 +122,17 @@ async def test_login_invalid_username(page):
     debug_print("Starting invalid username test")
     app = App(page)
     
-    await app.login.navigate()
-    await app.login.login(
+    await app.login_page.navigate()
+    await app.login_page.login(
         INVALID_USERS["invalid_username"]["username"],
         INVALID_USERS["invalid_username"]["password"]
     )
     
     # Should remain on login page
-    assert await app.login.is_on_login_page()
+    assert await app.login_page.is_on_login_page()
     
     # Verify error message
-    flash_text = await app.login.get_flash_message()
+    flash_text = await app.login_page.get_flash_message()
     assert EXPECTED_MESSAGES["invalid_username"] in flash_text
     
     debug_print("Invalid username test completed")
@@ -102,6 +144,7 @@ async def test_login_invalid_username(page):
 
 @screenshot_on_failure
 @pytest.mark.login
+@pytest.mark.smoke
 @pytest.mark.asyncio
 async def test_login_invalid_password(page):
     """
@@ -111,17 +154,17 @@ async def test_login_invalid_password(page):
     debug_print("Starting invalid password test")
     app = App(page)
     
-    await app.login.navigate()
-    await app.login.login(
+    await app.login_page.navigate()
+    await app.login_page.login(
         INVALID_USERS["invalid_password"]["username"],
         INVALID_USERS["invalid_password"]["password"]
     )
     
     # Should remain on login page
-    assert await app.login.is_on_login_page()
+    assert await app.login_page.is_on_login_page()
     
     # Verify error message
-    flash_text = await app.login.get_flash_message()
+    flash_text = await app.login_page.get_flash_message()
     assert EXPECTED_MESSAGES["invalid_password"] in flash_text
     
     debug_print("Invalid password test completed")
@@ -142,11 +185,11 @@ async def test_login_empty_credentials(page):
     debug_print("Starting empty credentials test")
     app = App(page)
     
-    await app.login.navigate()
-    await app.login.login("", "")
+    await app.login_page.navigate()
+    await app.login_page.login("", "")
     
     # Should remain on login page
-    assert await app.login.is_on_login_page()
+    assert await app.login_page.is_on_login_page()
     
     debug_print("Empty credentials test completed")
 
@@ -157,6 +200,7 @@ async def test_login_empty_credentials(page):
 
 @screenshot_on_failure
 @pytest.mark.login
+@pytest.mark.smoke
 @pytest.mark.asyncio
 async def test_logout_functionality(page):
     """
@@ -167,18 +211,18 @@ async def test_logout_functionality(page):
     app = App(page)
     
     # First login successfully
-    await app.login.navigate()
-    await app.login.login_with_demo_user()
-    assert await app.secure.is_on_secure_page()
+    await app.login_page.navigate()
+    await app.login_page.login_with_demo_user()
+    assert await app.secure_page.is_on_secure_page()
     
     # Then logout
-    await app.secure.logout()
+    await app.secure_page.logout()
     
     # Should be back on login page
-    assert await app.login.is_on_login_page()
+    assert await app.login_page.is_on_login_page()
     
     # Verify logout message
-    flash_text = await app.login.get_flash_message()
+    flash_text = await app.login_page.get_flash_message()
     assert "You logged out of the secure area!" in flash_text
     
     debug_print("Logout functionality test completed")
@@ -199,21 +243,21 @@ async def test_form_field_validation(page):
     debug_print("Starting form field validation test")
     app = App(page)
     
-    await app.login.navigate()
+    await app.login_page.navigate()
     
     # Test individual field interactions
-    await app.login.enter_username("test_user")
-    username_value = await app.login.get_username_value()
+    await app.login_page.enter_username("test_user")
+    username_value = await app.login_page.get_username_value()
     assert username_value == "test_user"
     
-    await app.login.enter_password("test_password")
+    await app.login_page.enter_password("test_password")
     # Note: Password field value typically can't be read for security
     
     # Clear fields
-    await app.login.clear_username()
-    await app.login.clear_password()
+    await app.login_page.clear_username()
+    await app.login_page.clear_password()
     
-    username_value = await app.login.get_username_value()
+    username_value = await app.login_page.get_username_value()
     assert username_value == ""
     
     debug_print("Form field validation test completed")

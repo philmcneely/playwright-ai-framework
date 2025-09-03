@@ -18,63 +18,31 @@ Usage Example:
     from pages.app import App
     
     @pytest.mark.asyncio
-    async def test_login_flow(page):
-        app = App(page)
-        await app.login.navigate()
-        await app.login.enter_username("tomsmith")
-        await app.login.enter_password("SuperSecretPassword!")
-        await app.login.click_login()
+    async def test_login_flow(app):
+        await app.login_page.navigate()
+        await app.login_page.enter_username("tomsmith")
+        await app.login_page.enter_password("SuperSecretPassword!")
+        await app.login_page.click_login()
         
         # Access secure page through same app instance
-        assert await app.secure.is_on_secure_page()
-        
-Dependencies:
-    - pages.login_page: LoginPage object
-    - pages.secure_page: SecurePage object
-    - config.settings: Environment configuration
-    - utils.debug: Debug logging utilities
+        assert await app.secure_page.is_on_secure_page()
 
-Author: Playwright AI Test Framework
+Conventions:
+    - All page objects are instantiated in __init__ for immediate availability
+    - Page objects are stored as instance attributes for easy access
+    - No async operations are performed in __init__ to avoid fixture issues
+    - New page objects should be added as attributes following the same pattern
+
+Author: PMAC
 Site: The Internet (https://the-internet.herokuapp.com)
 ===============================================================================
 """
-from playwright.async_api import Page
 from pages.login_page import LoginPage
 from pages.secure_page import SecurePage
-from config.settings import settings
-from utils.debug import debug_print
 
 
 class App:
-    """Main application class providing access to all page objects."""
-    
-    def __init__(self, page: Page):
+    def __init__(self, page):
         self.page = page
-        
-        # Initialize page objects
-        self.login = LoginPage(page)
-        self.secure = SecurePage(page)
-    
-    async def navigate_to_home(self) -> None:
-        """Navigate to the home page of The Internet."""
-        debug_print(f"Navigating to home page: {settings.BASE_URL}")
-        await self.page.goto(settings.BASE_URL)
-        await self.page.wait_for_load_state()
-    
-    async def get_current_url(self) -> str:
-        """Get the current page URL."""
-        return self.page.url
-    
-    async def get_page_title(self) -> str:
-        """Get the current page title."""
-        return await self.page.title()
-    
-    async def take_screenshot(self, name: str = "app_screenshot") -> bytes:
-        """Take a screenshot of the current page."""
-        debug_print(f"Taking application screenshot: {name}")
-        return await self.page.screenshot(full_page=True)
-    
-    async def close(self) -> None:
-        """Close the page/browser."""
-        debug_print("Closing application")
-        await self.page.close()
+        self.login_page = LoginPage(page)
+        self.secure_page = SecurePage(page)

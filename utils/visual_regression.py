@@ -45,11 +45,14 @@ import pytest_asyncio
 import numpy as np
 from playwright.async_api import Page
 from PIL import Image, ImageChops
+from config.artifact_paths import (
+    VISUAL_BASELINE_DIR, VISUAL_CURRENT_DIR, VISUAL_DIFF_DIR
+)
 
 # Directory configuration for visual regression files
-BASELINE_DIR = "test_artifacts/visual/visual_baselines"
-CURRENT_DIR = "test_artifacts/visual/visual_current"
-DIFF_DIR = "test_artifacts/visual/visual_diffs"
+BASELINE_DIR = str(VISUAL_BASELINE_DIR)
+CURRENT_DIR = str(VISUAL_CURRENT_DIR)
+DIFF_DIR = str(VISUAL_DIFF_DIR)
 
 # Ensure directories exist
 os.makedirs(BASELINE_DIR, exist_ok=True)

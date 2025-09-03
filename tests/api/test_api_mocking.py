@@ -30,7 +30,7 @@ Test Categories:
 Usage Example:
     pytest tests/api/test_api_mocking.py -v
 
-Author: Playwright AI Test Framework
+Author: PMAC
 Site: The Internet (https://the-internet.herokuapp.com)
 Date: [2025-09-03]
 ===============================================================================
