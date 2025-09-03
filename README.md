@@ -82,6 +82,7 @@ python -m venv .venv
 ```sh
 pip install --upgrade pip
 pip install -r requirements_with_versions.txt
+pip install ollama
 ```
 
 Make sure your `requirements_with_versions.txt` includes:
@@ -97,9 +98,13 @@ numpy
 
 ## 5. Install Playwright Browsers
 
+**Important:** This step is required to download browser binaries for Chromium, Firefox, and WebKit.
+
 ```sh
 python -m playwright install --with-deps
 ```
+
+> **Note:** If you encounter "Executable doesn't exist" errors when running tests with specific browsers (e.g., Firefox), make sure you've run this command to install all browser binaries.
 
 ---
 
