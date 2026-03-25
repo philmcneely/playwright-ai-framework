@@ -1,0 +1,572 @@
+name: ClickUp PR Sync
+
+# Syncs PR lifecycle events to ClickUp tasks and dispatches agent fixes.
+# Task ID extracted from: PR body "ClickUp: TASKID", branch name, or keyword search.
+#
+# Required repo secrets: CLICKUP_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+
+on:
+  pull_request:
+    branches: [main, master]
+    types: [opened, closed, reopened]
+  pull_request_review:
+    types: [submitted]
+  workflow_run:
+    workflows: ["Playwright Tests"]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+
+jobs:
+  # ── PR Opened / Reopened ────────────────────────────────────────────
+  pr-opened:
+    if: >-
+      github.event_name == 'pull_request' &&
+      (github.event.action == 'opened' || github.event.action == 'reopened')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post PR link to ClickUp
+        env:
+          CLICKUP_API_KEY: ${{ secrets.CLICKUP_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          CLICKUP_TEAM_ID: "9017852829"
+        run: |
+          # Extract ClickUp task ID using Python (safe from injection)
+          TASK_ID=$(python3 << 'PYEOF'
+          import os, json, re, urllib.request
+
+          pr_body = os.environ.get("PR_BODY", "")
+          branch = os.environ.get("BRANCH", "")
+          api_key = os.environ.get("CLICKUP_API_KEY", "")
+          team_id = os.environ.get("CLICKUP_TEAM_ID", "")
+
+          task_id = ""
+
+          # Method 1: PR body contains "ClickUp: TASKID" or "Task: TASKID"
+          m = re.search(r'(?:clickup|task)[\s:]+([a-z0-9]{8,})', pr_body, re.IGNORECASE)
+          if m:
+              task_id = m.group(1)
+
+          # Method 2: Branch name contains ClickUp task ID pattern
+          if not task_id:
+              m = re.search(r'(8[0-9a-z]{8,})', branch)
+              if m:
+                  task_id = m.group(1)
+
+          # Method 3: Search ClickUp by branch keyword
+          if not task_id and api_key:
+              keyword = re.sub(r'^feature/', '', branch)
+              keyword = re.sub(r'-v\d+$', '', keyword)
+              keyword = keyword.replace('-', ' ').lower()
+              if keyword:
+                  try:
+                      req = urllib.request.Request(
+                          f"https://api.clickup.com/api/v2/team/{team_id}/task?statuses%5B%5D=in+progress&statuses%5B%5D=testing&include_closed=false&subtasks=true&page=0",
+                          headers={"Authorization": api_key}
+                      )
+                      with urllib.request.urlopen(req, timeout=15) as resp:
+                          data = json.loads(resp.read())
+                      kw_norm = keyword.replace(' ', '-')
+                      for t in data.get("tasks", []):
+                          name = t.get("name", "").lower()
+                          if kw_norm in name.replace(' ', '-') or keyword in name:
+                              task_id = t["id"]
+                              break
+                  except Exception:
+                      pass
+
+          print(task_id)
+          PYEOF
+          )
+
+          if [ -z "$TASK_ID" ]; then
+            echo "No ClickUp task found for branch: $BRANCH"
+            if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+              python3 << 'PYEOF'
+          import os, json, urllib.request
+          token = os.environ["TELEGRAM_BOT_TOKEN"]
+          chat_id = os.environ["TELEGRAM_CHAT_ID"]
+          pr_num = os.environ["PR_NUM"]
+          pr_title = os.environ["PR_TITLE"]
+          branch = os.environ["BRANCH"]
+          pr_url = os.environ["PR_URL"]
+          msg = f"PR #{pr_num} opened: {pr_title}\nBranch: {branch}\nNo ClickUp task linked.\n{pr_url}"
+          payload = json.dumps({"chat_id": chat_id, "text": msg}).encode()
+          req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=payload, headers={"Content-Type": "application/json"})
+          urllib.request.urlopen(req, timeout=10)
+          PYEOF
+            fi
+            exit 0
+          fi
+
+          echo "Found ClickUp task: $TASK_ID"
+          export TASK_ID
+
+          # Post PR link to ClickUp + Telegram alert (all via Python, injection-safe)
+          python3 << 'PYEOF'
+          import os, json, urllib.request
+
+          api_key = os.environ["CLICKUP_API_KEY"]
+          task_id = os.environ["TASK_ID"]
+          pr_num = os.environ["PR_NUM"]
+          pr_title = os.environ["PR_TITLE"]
+          pr_url = os.environ["PR_URL"]
+          branch = os.environ["BRANCH"]
+          token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+          chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+          # Post to ClickUp
+          comment = f"🔗 PR OPENED — GitHub\nPR #{pr_num}: {pr_title}\nBranch: {branch}\n{pr_url}"
+          payload = json.dumps({"comment_text": comment}).encode()
+          req = urllib.request.Request(
+              f"https://api.clickup.com/api/v2/task/{task_id}/comment",
+              data=payload,
+              headers={"Authorization": api_key, "Content-Type": "application/json"}
+          )
+          try:
+              urllib.request.urlopen(req, timeout=15)
+          except Exception as e:
+              print(f"ClickUp comment failed: {e}")
+
+          # Telegram alert
+          if token and chat_id:
+              msg = f"PR #{pr_num} opened for task {task_id}\n{pr_title}\n{pr_url}"
+              payload = json.dumps({"chat_id": chat_id, "text": msg}).encode()
+              req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=payload, headers={"Content-Type": "application/json"})
+              try:
+                  urllib.request.urlopen(req, timeout=10)
+              except Exception:
+                  pass
+          PYEOF
+
+  # ── PR Merged ───────────────────────────────────────────────────────
+  pr-merged:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.action == 'closed' &&
+      github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post merge to ClickUp (wait for main CI before completing)
+        env:
+          CLICKUP_API_KEY: ${{ secrets.CLICKUP_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          CLICKUP_TEAM_ID: "9017852829"
+        run: |
+          python3 << 'PYEOF'
+          import os, json, re, urllib.request
+
+          api_key = os.environ.get("CLICKUP_API_KEY", "")
+          token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+          chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+          pr_num = os.environ["PR_NUM"]
+          pr_url = os.environ["PR_URL"]
+          branch = os.environ["BRANCH"]
+          merge_sha = os.environ["MERGE_SHA"]
+          short_sha = merge_sha[:7]
+          pr_body = os.environ.get("PR_BODY", "")
+          team_id = os.environ.get("CLICKUP_TEAM_ID", "")
+
+          # Find task ID (same logic as pr-opened)
+          task_id = ""
+          m = re.search(r'(?:clickup|task)[\s:]+([a-z0-9]{8,})', pr_body, re.IGNORECASE)
+          if m:
+              task_id = m.group(1)
+          if not task_id:
+              m = re.search(r'(8[0-9a-z]{8,})', branch)
+              if m:
+                  task_id = m.group(1)
+          if not task_id and api_key:
+              keyword = re.sub(r'^feature/', '', branch).replace('-', ' ').lower()
+              keyword = re.sub(r' v\d+$', '', keyword)
+              if keyword:
+                  try:
+                      req = urllib.request.Request(
+                          f"https://api.clickup.com/api/v2/team/{team_id}/task?include_closed=false&subtasks=true&page=0",
+                          headers={"Authorization": api_key}
+                      )
+                      with urllib.request.urlopen(req, timeout=15) as resp:
+                          data = json.loads(resp.read())
+                      kw_norm = keyword.replace(' ', '-')
+                      for t in data.get("tasks", []):
+                          name = t.get("name", "").lower()
+                          if kw_norm in name.replace(' ', '-') or keyword in name:
+                              task_id = t["id"]
+                              break
+                  except Exception:
+                      pass
+
+          if not task_id:
+              print("No ClickUp task found — skipping")
+              exit(0)
+
+          # Post merge notice — do NOT complete yet, wait for main CI
+          comment = (
+              f"🔀 PR MERGED — GitHub\n"
+              f"PR #{pr_num} merged to main.\n"
+              f"Merge commit: {short_sha}\n"
+              f"Waiting for main branch CI before completing task.\n"
+              f"{pr_url}"
+          )
+          payload = json.dumps({"comment_text": comment}).encode()
+          req = urllib.request.Request(
+              f"https://api.clickup.com/api/v2/task/{task_id}/comment",
+              data=payload,
+              headers={"Authorization": api_key, "Content-Type": "application/json"}
+          )
+          try:
+              urllib.request.urlopen(req, timeout=15)
+          except Exception as e:
+              print(f"ClickUp comment failed: {e}")
+
+          if token and chat_id:
+              msg = f"PR #{pr_num} merged for task {task_id}\nWaiting for main CI...\nCommit: {short_sha}"
+              payload = json.dumps({"chat_id": chat_id, "text": msg}).encode()
+              req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=payload, headers={"Content-Type": "application/json"})
+              try:
+                  urllib.request.urlopen(req, timeout=10)
+              except Exception:
+                  pass
+          PYEOF
+
+  # ── PR Closed Without Merge ─────────────────────────────────────────
+  pr-closed-no-merge:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.action == 'closed' &&
+      github.event.pull_request.merged == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post closure to ClickUp
+        env:
+          CLICKUP_API_KEY: ${{ secrets.CLICKUP_API_KEY }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          TASK_ID_HINT: ""
+        run: |
+          python3 << 'PYEOF'
+          import os, json, re, urllib.request
+          api_key = os.environ.get("CLICKUP_API_KEY", "")
+          pr_num = os.environ["PR_NUM"]
+          pr_body = os.environ.get("PR_BODY", "")
+          branch = os.environ["BRANCH"]
+
+          task_id = ""
+          m = re.search(r'(?:clickup|task)[\s:]+([a-z0-9]{8,})', pr_body, re.IGNORECASE)
+          if m:
+              task_id = m.group(1)
+          if not task_id:
+              m = re.search(r'(8[0-9a-z]{8,})', branch)
+              if m:
+                  task_id = m.group(1)
+
+          if not task_id or not api_key:
+              exit(0)
+
+          comment = f"❌ PR CLOSED — GitHub\nPR #{pr_num} closed WITHOUT merge.\nTask remains in current status."
+          payload = json.dumps({"comment_text": comment}).encode()
+          req = urllib.request.Request(
+              f"https://api.clickup.com/api/v2/task/{task_id}/comment",
+              data=payload,
+              headers={"Authorization": api_key, "Content-Type": "application/json"}
+          )
+          try:
+              urllib.request.urlopen(req, timeout=15)
+          except Exception:
+              pass
+          PYEOF
+
+  # ── Review Submitted ────────────────────────────────────────────────
+  review-submitted:
+    if: github.event_name == 'pull_request_review'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post review to ClickUp and dispatch agent if changes requested
+        env:
+          CLICKUP_API_KEY: ${{ secrets.CLICKUP_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          REVIEW_STATE: ${{ github.event.review.state }}
+          REVIEW_BODY: ${{ github.event.review.body }}
+          REVIEWER: ${{ github.event.review.user.login }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          CLICKUP_TEAM_ID: "9017852829"
+        run: |
+          python3 << 'PYEOF'
+          import os, json, re, urllib.request
+
+          api_key = os.environ.get("CLICKUP_API_KEY", "")
+          token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+          chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+          review_state = os.environ["REVIEW_STATE"]
+          review_body = os.environ.get("REVIEW_BODY", "") or ""
+          reviewer = os.environ["REVIEWER"]
+          pr_num = os.environ["PR_NUM"]
+          pr_url = os.environ["PR_URL"]
+          pr_body = os.environ.get("PR_BODY", "")
+          branch = os.environ["BRANCH"]
+          team_id = os.environ.get("CLICKUP_TEAM_ID", "")
+
+          # Find task ID
+          task_id = ""
+          m = re.search(r'(?:clickup|task)[\s:]+([a-z0-9]{8,})', pr_body, re.IGNORECASE)
+          if m:
+              task_id = m.group(1)
+          if not task_id:
+              m = re.search(r'(8[0-9a-z]{8,})', branch)
+              if m:
+                  task_id = m.group(1)
+          if not task_id and api_key:
+              keyword = re.sub(r'^feature/', '', branch).replace('-', ' ').lower()
+              keyword = re.sub(r' v\d+$', '', keyword)
+              if keyword:
+                  try:
+                      req = urllib.request.Request(
+                          f"https://api.clickup.com/api/v2/team/{team_id}/task?include_closed=false&subtasks=true&page=0",
+                          headers={"Authorization": api_key}
+                      )
+                      with urllib.request.urlopen(req, timeout=15) as resp:
+                          data = json.loads(resp.read())
+                      kw_norm = keyword.replace(' ', '-')
+                      for t in data.get("tasks", []):
+                          name = t.get("name", "").lower()
+                          if kw_norm in name.replace(' ', '-') or keyword in name:
+                              task_id = t["id"]
+                              break
+                  except Exception:
+                      pass
+
+          if not task_id or not api_key:
+              exit(0)
+
+          icons = {"changes_requested": "🔴", "approved": "✅"}
+          icon = icons.get(review_state, "💬")
+          action = review_state.upper().replace("_", " ")
+
+          # Post review to ClickUp
+          comment = f"{icon} PR REVIEW: {action} — {reviewer}"
+          if review_body:
+              comment += f"\n{review_body[:500]}"
+          comment += f"\n{pr_url}"
+
+          payload = json.dumps({"comment_text": comment}).encode()
+          req = urllib.request.Request(
+              f"https://api.clickup.com/api/v2/task/{task_id}/comment",
+              data=payload,
+              headers={"Authorization": api_key, "Content-Type": "application/json"}
+          )
+          try:
+              urllib.request.urlopen(req, timeout=15)
+          except Exception as e:
+              print(f"ClickUp comment failed: {e}")
+
+          # Dispatch agent on changes_requested
+          if review_state == "changes_requested" and token and chat_id:
+              msg = (
+                  f"🔴 PR #{pr_num} changes requested by {reviewer}\n"
+                  f"Task: {task_id}\n"
+                  f"Agent: address review comments and push fix.\n"
+                  f"{pr_url}"
+              )
+              payload = json.dumps({"chat_id": chat_id, "text": msg}).encode()
+              req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=payload, headers={"Content-Type": "application/json"})
+              try:
+                  urllib.request.urlopen(req, timeout=10)
+              except Exception:
+                  pass
+          PYEOF
+
+  # ── CI Completed (from Playwright Tests workflow) ───────────────────
+  ci-completed:
+    if: github.event_name == 'workflow_run'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Handle CI result — post to ClickUp, dispatch on failure, complete on main success
+        env:
+          CLICKUP_API_KEY: ${{ secrets.CLICKUP_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          WF_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          REPO: ${{ github.repository }}
+          CLICKUP_TEAM_ID: "9017852829"
+        run: |
+          python3 << 'PYEOF'
+          import os, json, re, urllib.request
+
+          api_key = os.environ.get("CLICKUP_API_KEY", "")
+          token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+          chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+          conclusion = os.environ["CONCLUSION"]
+          run_url = os.environ["RUN_URL"]
+          branch = os.environ["WF_BRANCH"]
+          head_sha = os.environ["HEAD_SHA"]
+          short_sha = head_sha[:7]
+          repo = os.environ["REPO"]
+          team_id = os.environ.get("CLICKUP_TEAM_ID", "")
+
+          is_main = branch in ("main", "master")
+
+          def find_task_id(branch_name, body=""):
+              """Extract ClickUp task ID from branch name or body text."""
+              tid = ""
+              m = re.search(r'(?:clickup|task)[\s:]+([a-z0-9]{8,})', body, re.IGNORECASE)
+              if m:
+                  return m.group(1)
+              m = re.search(r'(8[0-9a-z]{8,})', branch_name)
+              if m:
+                  return m.group(1)
+              if api_key:
+                  keyword = re.sub(r'^feature/', '', branch_name).replace('-', ' ').lower()
+                  keyword = re.sub(r' v\d+$', '', keyword)
+                  if keyword:
+                      try:
+                          req = urllib.request.Request(
+                              f"https://api.clickup.com/api/v2/team/{team_id}/task?include_closed=false&subtasks=true&page=0",
+                              headers={"Authorization": api_key}
+                          )
+                          with urllib.request.urlopen(req, timeout=15) as resp:
+                              data = json.loads(resp.read())
+                          kw_norm = keyword.replace(' ', '-')
+                          for t in data.get("tasks", []):
+                              name = t.get("name", "").lower()
+                              if kw_norm in name.replace(' ', '-') or keyword in name:
+                                  return t["id"]
+                      except Exception:
+                          pass
+              return tid
+
+          def cu_comment(task_id, text):
+              payload = json.dumps({"comment_text": text}).encode()
+              req = urllib.request.Request(
+                  f"https://api.clickup.com/api/v2/task/{task_id}/comment",
+                  data=payload,
+                  headers={"Authorization": api_key, "Content-Type": "application/json"}
+              )
+              urllib.request.urlopen(req, timeout=15)
+
+          def cu_status(task_id, status):
+              payload = json.dumps({"status": status}).encode()
+              req = urllib.request.Request(
+                  f"https://api.clickup.com/api/v2/task/{task_id}",
+                  data=payload,
+                  headers={"Authorization": api_key, "Content-Type": "application/json"},
+                  method="PUT"
+              )
+              urllib.request.urlopen(req, timeout=15)
+
+          def tg_send(msg):
+              if not token or not chat_id:
+                  return
+              payload = json.dumps({"chat_id": chat_id, "text": msg}).encode()
+              req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=payload, headers={"Content-Type": "application/json"})
+              try:
+                  urllib.request.urlopen(req, timeout=10)
+              except Exception:
+                  pass
+
+          # ── PR branch CI ──
+          if not is_main:
+              task_id = find_task_id(branch)
+
+              if conclusion == "failure":
+                  if task_id and api_key:
+                      try:
+                          cu_comment(task_id, (
+                              f"🔴 CI FAILED — GitHub Actions\n"
+                              f"Branch: {branch}\n"
+                              f"Commit: {short_sha}\n"
+                              f"Agent: investigate and fix CI failures.\n"
+                              f"{run_url}"
+                          ))
+                      except Exception as e:
+                          print(f"ClickUp comment failed: {e}")
+                  tg_send(
+                      f"🔴 CI FAILED on branch {branch}\n"
+                      f"Task: {task_id or 'unknown'}\n"
+                      f"Commit: {short_sha}\n"
+                      f"Agent: fix CI failures and push.\n"
+                      f"{run_url}"
+                  )
+
+              elif conclusion == "success":
+                  if task_id and api_key:
+                      try:
+                          cu_comment(task_id, (
+                              f"✅ CI PASSED — GitHub Actions\n"
+                              f"Branch: {branch}\n"
+                              f"Commit: {short_sha}\n"
+                              f"Ready for review.\n"
+                              f"{run_url}"
+                          ))
+                      except Exception as e:
+                          print(f"ClickUp comment failed: {e}")
+
+          # ── Main branch CI ──
+          else:
+              if conclusion == "failure":
+                  # CRITICAL: main is broken after merge
+                  tg_send(
+                      f"🚨 CRITICAL: Main branch CI FAILED after merge!\n"
+                      f"Commit: {short_sha}\n"
+                      f"Agent: fix main branch immediately.\n"
+                      f"{run_url}"
+                  )
+
+              elif conclusion == "success":
+                  # Find which PR was just merged and complete its task
+                  try:
+                      req = urllib.request.Request(
+                          f"https://api.github.com/repos/{repo}/commits/{head_sha}/pulls",
+                          headers={"Accept": "application/vnd.github+json"}
+                      )
+                      with urllib.request.urlopen(req, timeout=15) as resp:
+                          prs = json.loads(resp.read())
+
+                      for pr in prs:
+                          if not pr.get("merged_at"):
+                              continue
+                          pr_branch = pr.get("head", {}).get("ref", "")
+                          pr_body = pr.get("body", "") or ""
+                          pr_num = pr.get("number", "?")
+
+                          task_id = find_task_id(pr_branch, pr_body)
+                          if task_id and api_key:
+                              cu_comment(task_id, (
+                                  f"🏁 COMPLETE — GitHub Actions\n"
+                                  f"PR #{pr_num} merged and main CI passed.\n"
+                                  f"Merge commit: {short_sha}\n"
+                                  f"Code is on main and CI green."
+                              ))
+                              cu_status(task_id, "complete")
+                              tg_send(
+                                  f"✅ Task {task_id} COMPLETE\n"
+                                  f"PR #{pr_num} merged + main CI green.\n"
+                                  f"Commit: {short_sha}"
+                              )
+                              break
+                  except Exception as e:
+                      print(f"Failed to find merged PR: {e}")
+          PYEOF
