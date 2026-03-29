@@ -74,6 +74,7 @@ from utils.ai_healing import get_ollama_service, find_page_object, ensure_ollama
 from utils.browserstack import is_browserstack_enabled
 from utils.debug import debug_print
 from playwright.async_api import async_playwright
+from utils.stability_index import record_result, get_unstable_tests
 
 # Import the visual regression fixture
 from utils.visual_regression import visual_regression
@@ -408,3 +409,27 @@ def pytest_runtest_makereport(item, call):
                     del _ai_healing_fail_counts[test_key]
         else:
             print(f"🔄 Test {item.name} will be retried (attempt {fail_count}), skipping AI healing")
+
+
+# ------------------------------------------------------------------------------
+# Hook: pytest_runtest_logreport — Stability Index tracking
+# ------------------------------------------------------------------------------
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_logreport(report):
+    """Record test results for stability tracking."""
+    if report.when == "call":
+        record_result(report.nodeid, report.passed)
+
+
+def pytest_collection_modifyitems(config, items):
+    """Quarantine unstable tests — they run but don't block CI."""
+    threshold = float(os.getenv("STABILITY_THRESHOLD", "0.7"))
+    unstable = get_unstable_tests(threshold)
+    if not unstable:
+        return
+    for item in items:
+        if item.nodeid in unstable:
+            item.add_marker(pytest.mark.xfail(
+                reason=f"Quarantined: stability below {threshold}",
+                strict=False
+            ))

@@ -410,8 +410,61 @@ See [BrowserStack Playwright Capabilities](https://www.browserstack.com/docs/aut
 
 ---
 
-**Tip:**  
+**Tip:**
 You can switch between local and BrowserStack runs by toggling the `BROWSERSTACK_ENABLED` variable, without changing your test code.
+
+---
+
+## 16. Stability Index (Flaky Test Quarantine)
+
+The stability index tracks pass/fail results per test over the last N runs. Tests that fall below a stability threshold are automatically quarantined (`xfail`) so they don't block your CI pipeline.
+
+### How It Works
+
+1. **Recording** — After every test run, the `pytest_runtest_logreport` hook records whether each test passed or failed into `data/stability_history.json`.
+2. **Stability score** — Each test gets a score from 0.0 (always fails) to 1.0 (always passes), calculated over a sliding window of the last 10 runs.
+3. **Quarantine** — At collection time, any test with a stability score below the threshold (default 0.7) is marked as `xfail(strict=False)`. It still runs, but a failure won't fail the suite.
+
+### Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `STABILITY_THRESHOLD` | `0.7` | Minimum pass rate (0.0–1.0) to avoid quarantine |
+
+### Usage
+
+No configuration needed — stability tracking is enabled automatically for all tests. After enough runs, flaky tests get quarantined:
+
+```sh
+# Run tests normally — stability is tracked automatically
+pytest
+
+# Adjust the quarantine threshold (e.g., quarantine anything below 80% pass rate)
+STABILITY_THRESHOLD=0.8 pytest
+```
+
+### Viewing the Stability Report
+
+You can inspect stability data programmatically:
+
+```python
+from utils.stability_index import get_stability, get_stability_report, get_unstable_tests
+
+# Check a single test
+score = get_stability("tests/login/test_login.py::test_login_valid")
+
+# Get full report (all tracked tests)
+report = get_stability_report()
+
+# List all quarantined tests at current threshold
+unstable = get_unstable_tests(threshold=0.7)
+```
+
+### Data Storage
+
+- History file: `data/stability_history.json`
+- Keeps the last 10 results per test (configurable via `DEFAULT_WINDOW`)
+- Safe to delete — tracking restarts from scratch with no history (all tests assumed stable)
 
 ---
 
@@ -501,7 +554,8 @@ python onefilellm.py /path/to/your/local/repo
 ├── 📂 pages/                           — Page Object Models
 ├── 📂 utils/                           — Utilities
 │   ├── 📄 visual_regression.py
-│   └── 📄 network_mocking.py
+│   ├── 📄 network_mocking.py
+│   └── 📄 stability_index.py
 ├── 📂 data/                            — Test data
 ├── 📂 config/                          — Settings
 ├── 📂 tests/                           — Test files
