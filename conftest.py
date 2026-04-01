@@ -71,9 +71,13 @@ import threading
 from collections import defaultdict
 import asyncio
 from utils.ai_healing import get_ollama_service, find_page_object, ensure_ollama_ready
+from pathlib import Path
+from utils.api_capture import APICapture
 from utils.browserstack import is_browserstack_enabled
 from utils.debug import debug_print
+from utils.zap_integration import ZAPIntegration
 from playwright.async_api import async_playwright
+from utils.stability_index import record_result, get_unstable_tests
 
 # Import the visual regression fixture
 from utils.visual_regression import visual_regression
@@ -89,6 +93,7 @@ _ai_healing_fail_counts = defaultdict(int)
 _ai_healing_lock = threading.Lock()
 
 ollama_service = get_ollama_service()
+zap = ZAPIntegration()
 
 class ElementNotFoundException(Exception):
     """
@@ -245,6 +250,10 @@ async def page():
             context = await browser.new_context()
             page = await context.new_page()
             print("\n Using BrowserStack cloud browser")
+            api_capture = APICapture()
+            page.on("request", api_capture.on_request)
+            page.on("response", api_capture.on_response)
+            page._api_capture = api_capture
             yield page
             await browser.close()
     else:
@@ -254,6 +263,11 @@ async def page():
             headless = os.getenv("HEADLESS", str(settings.HEADLESS)).lower() == "true"
             browser_options = settings.get_browser_options()
             browser_options["headless"] = headless
+            # Add ZAP proxy if enabled
+            if zap.enabled and zap.is_running():
+                proxy_config = zap.get_browser_proxy_config()
+                browser_options.update(proxy_config)
+                print(f"\nZAP proxy enabled: {zap.proxy_url}")
             if browser_name == "chromium":
                 browser = await p.chromium.launch(**browser_options)
             elif browser_name == "firefox":
@@ -265,6 +279,10 @@ async def page():
             context = await browser.new_context()
             page = await context.new_page()
             print(f"\n Using {browser_name} browser (headless={headless})")
+            api_capture = APICapture()
+            page.on("request", api_capture.on_request)
+            page.on("response", api_capture.on_response)
+            page._api_capture = api_capture
             yield page
             await browser.close()
 
@@ -306,6 +324,16 @@ def pytest_runtest_makereport(item, call):
         # Capture context on EVERY failure (for screenshot, DOM, etc.)
         page = find_page_object(item)
         error_message = str(call.excinfo.value) if call.excinfo else "Unknown error"
+
+        # Attach captured API requests on failure
+        if page and hasattr(page, '_api_capture'):
+            api_data = page._api_capture.to_json()
+            if api_data and api_data != "[]":
+                allure.attach(
+                    api_data,
+                    name=f"API Requests: {item.name}",
+                    attachment_type=allure.attachment_type.JSON
+                )
 
         # Use async capture_failure_context for full context (including DOM)
         if page:
@@ -408,3 +436,46 @@ def pytest_runtest_makereport(item, call):
                     del _ai_healing_fail_counts[test_key]
         else:
             print(f"🔄 Test {item.name} will be retried (attempt {fail_count}), skipping AI healing")
+
+
+# ------------------------------------------------------------------------------
+# Hook: pytest_runtest_logreport — Stability Index tracking
+# ------------------------------------------------------------------------------
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_logreport(report):
+    """Record test results for stability tracking."""
+    if report.when == "call":
+        record_result(report.nodeid, report.passed)
+
+
+def pytest_collection_modifyitems(config, items):
+    """Quarantine unstable tests — they run but don't block CI."""
+    threshold = float(os.getenv("STABILITY_THRESHOLD", "0.7"))
+    unstable = get_unstable_tests(threshold)
+    if not unstable:
+        return
+    for item in items:
+        if item.nodeid in unstable:
+            item.add_marker(pytest.mark.xfail(
+                reason=f"Quarantined: stability below {threshold}",
+                strict=False
+            ))
+
+
+# ------------------------------------------------------------------------------
+# Fixture: zap_report_on_finish
+# ------------------------------------------------------------------------------
+
+@pytest.fixture(scope="session", autouse=True)
+def zap_report_on_finish(request):
+    """Generate ZAP security report after all tests complete."""
+    yield
+    if zap.enabled and zap.is_running():
+        report = zap.generate_report()
+        report_path = Path("test_artifacts/zap_report.md")
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(report)
+        print(f"\nZAP report saved: {report_path}")
+        alerts = zap.get_alerts_summary()
+        if alerts.get("High", 0) > 0:
+            print(f"WARNING: ZAP found {alerts['High']} HIGH severity issues!")
