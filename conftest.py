@@ -62,6 +62,7 @@ Date: [2025-07-29]
 
 import os
 import json
+import time
 import allure
 import pytest
 import pytest_asyncio
@@ -74,6 +75,8 @@ from utils.ai_healing import get_ollama_service, find_page_object, ensure_ollama
 from utils.browserstack import is_browserstack_enabled
 from utils.debug import debug_print
 from playwright.async_api import async_playwright
+from utils.jira_client import get_jira_client, extract_ticket_id, JiraTestResult
+from utils.test_observability import get_observability_collector, TestMetric, categorize_error
 
 # Import the visual regression fixture
 from utils.visual_regression import visual_regression
@@ -408,3 +411,96 @@ def pytest_runtest_makereport(item, call):
                     del _ai_healing_fail_counts[test_key]
         else:
             print(f"🔄 Test {item.name} will be retried (attempt {fail_count}), skipping AI healing")
+
+
+# ------------------------------------------------------------------------------
+# Jira + Observability singletons
+# ------------------------------------------------------------------------------
+
+jira_client = get_jira_client()
+observability_collector = get_observability_collector()
+
+_test_start_times: dict[str, float] = {}
+_observability_retry_counts: dict[str, int] = defaultdict(int)
+
+
+# ------------------------------------------------------------------------------
+# Hook: pytest_runtest_setup — track test start time
+# ------------------------------------------------------------------------------
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    _test_start_times[item.nodeid] = time.time()
+
+
+# ------------------------------------------------------------------------------
+# Hook: pytest_runtest_logreport — Jira reporting + observability
+# ------------------------------------------------------------------------------
+
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_logreport(report):
+    if report.when != "call":
+        return
+
+    nodeid = report.nodeid
+
+    if report.failed:
+        _observability_retry_counts[nodeid] += 1
+
+    max_reruns = 0
+    try:
+        max_reruns = report.config.getoption("reruns") or 0
+    except (ValueError, AttributeError):
+        pass
+
+    is_final = report.passed or report.skipped or _observability_retry_counts.get(nodeid, 0) > max_reruns
+
+    if not is_final:
+        return
+
+    duration_ms = int((time.time() - _test_start_times.get(nodeid, time.time())) * 1000)
+    browser = os.getenv("BROWSER", settings.BROWSER)
+
+    # --- Observability ---
+    if observability_collector.enabled:
+        error_msg = str(report.longrepr) if report.failed else None
+        metric = TestMetric(
+            test_id=nodeid,
+            test_name=report.head_line if hasattr(report, "head_line") else nodeid.split("::")[-1],
+            suite="::".join(nodeid.split("::")[:-1]),
+            status="passed" if report.passed else ("skipped" if report.skipped else "failed"),
+            duration_ms=duration_ms,
+            retry_count=_observability_retry_counts.get(nodeid, 0),
+            browser=browser,
+            error_category=categorize_error(error_msg),
+            tags=[m.name for m in report.config.getini("markers") if hasattr(report, "markers")] if hasattr(report, "markers") else [],
+        )
+        observability_collector.record(metric)
+
+    # --- Jira ---
+    if jira_client.enabled:
+        ticket_id = extract_ticket_id(nodeid)
+        if ticket_id:
+            status = "passed" if report.passed else ("skipped" if report.skipped else "failed")
+            result = JiraTestResult(
+                ticket_id=ticket_id,
+                test_name=nodeid.split("::")[-1],
+                status=status,
+                duration_ms=duration_ms,
+                error_message=str(report.longrepr)[:2000] if report.failed else None,
+                test_file=nodeid.split("::")[0],
+            )
+            try:
+                jira_client.report_test_result(result)
+            except Exception as e:
+                print(f"[Jira] Failed to report {ticket_id}: {e}")
+
+
+# ------------------------------------------------------------------------------
+# Hook: pytest_sessionfinish — write observability report
+# ------------------------------------------------------------------------------
+
+def pytest_sessionfinish(session, exitstatus):
+    if observability_collector.enabled:
+        observability_collector.write_report()
+        observability_collector.print_summary()
