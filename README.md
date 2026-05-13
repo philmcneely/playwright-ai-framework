@@ -415,6 +415,104 @@ You can switch between local and BrowserStack runs by toggling the `BROWSERSTACK
 
 ---
 
+## 16. Jira Integration
+
+Automatically post test results to Jira tickets and trigger workflow transitions on pass/fail. Conditionally enabled via environment variables.
+
+### Setup
+
+Add the following to your `.env.dev` (or relevant `.env` file):
+
+```
+JIRA_ENABLED=true
+JIRA_BASE=https://your-instance.atlassian.net
+JIRA_USER=you@example.com
+JIRA_TOKEN=your_api_token
+JIRA_DRY_RUN=false
+```
+
+> **Note:** Set `JIRA_ENABLED=false` to disable Jira reporting entirely. Set `JIRA_DRY_RUN=true` to log what would be posted without making actual API calls.
+
+### Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `JIRA_ENABLED` | `false` | Enable/disable Jira reporting |
+| `JIRA_BASE` | — | Jira instance URL |
+| `JIRA_USER` | — | Jira username/email |
+| `JIRA_TOKEN` | — | Jira API token |
+| `JIRA_JQL` | `project = ABC AND status in ("To Do", "In Progress")` | JQL filter for ticket lookup |
+| `JIRA_DRY_RUN` | `false` | Log instead of posting |
+| `JIRA_TRANSITION_ON_PASS` | — | Workflow transition name when test passes |
+| `JIRA_TRANSITION_ON_FAIL` | — | Workflow transition name when test fails |
+
+### How It Works
+
+1. Test names or node IDs are scanned for Jira ticket patterns (e.g., `PROJ-123`).
+2. On test completion (pass or final retry failure), a formatted comment is posted to the ticket.
+3. If transition env vars are configured, the ticket's workflow state is updated automatically.
+
+### Linking Tests to Tickets
+
+Include the ticket ID in your test name or file path:
+
+```python
+def test_PROJ_123_login_flow(page):
+    ...
+```
+
+Or use pytest marks/node IDs that contain the ticket pattern `[A-Z][A-Z0-9]+-\d+`.
+
+---
+
+## 17. Test Observability
+
+Structured per-test metrics collection with JSONL output, summary reports, and error categorization. Tracks flake rate, pass rate, slowest tests, heal events, and failures by category.
+
+### Setup
+
+```
+OBSERVABILITY_ENABLED=true
+```
+
+> **Note:** Set `OBSERVABILITY_ENABLED=false` to disable metric collection entirely. Zero overhead when disabled.
+
+### What Gets Tracked
+
+Each test execution records:
+
+| Field | Description |
+|---|---|
+| `test_id` | Unique test identifier (node ID) |
+| `test_name` | Human-readable test name |
+| `suite` | Test suite/module |
+| `status` | passed, failed, skipped |
+| `duration_ms` | Execution time in milliseconds |
+| `retry_count` | Number of retries for this test |
+| `browser` | Browser engine used |
+| `commit_sha` | Git commit (auto-detected) |
+| `branch` | Git branch (auto-detected) |
+| `heal_event` | Whether AI healing was triggered |
+| `error_category` | Auto-categorized: timeout, element-not-found, navigation, assertion, browser-crash, other |
+
+### Output Files
+
+| File | Location |
+|---|---|
+| JSONL metrics | `test_artifacts/observability/metrics.jsonl` |
+| Summary JSON | `test_artifacts/observability/summary.json` |
+| Markdown report | `test_artifacts/observability/report.md` |
+
+### Running with Observability
+
+```sh
+OBSERVABILITY_ENABLED=true pytest --alluredir=test_artifacts/allure/allure-results --capture=tee-sys --reruns 2 --reruns-delay 5 -m smoke -n auto
+```
+
+The summary is printed to the console at the end of the session and a Markdown report is written to `test_artifacts/observability/report.md`.
+
+---
+
 **Regenerate Docs for LLMs:**  
 This project makes use of OneFileLLM: https://github.com/jimmc414/onefilellm
 
@@ -498,10 +596,16 @@ python onefilellm.py /path/to/your/local/repo
 │   │   ├── 📂 allure-report            — Generated Allure HTML report
 │   │   ├── 📂 allure-results           — Raw test results
 │   │   ├── 📂 screenshots              — Test screenshots
+│   ├── 📂 observability/
+│   │   ├── 📄 metrics.jsonl            — Per-test JSONL metrics
+│   │   ├── 📄 summary.json             — Aggregated summary
+│   │   └── 📄 report.md                — Markdown report
 ├── 📂 pages/                           — Page Object Models
 ├── 📂 utils/                           — Utilities
 │   ├── 📄 visual_regression.py
-│   └── 📄 network_mocking.py
+│   ├── 📄 network_mocking.py
+│   ├── 📄 jira_client.py              — Jira REST API client
+│   └── 📄 test_observability.py       — Test metrics collector
 ├── 📂 data/                            — Test data
 ├── 📂 config/                          — Settings
 ├── 📂 tests/                           — Test files
