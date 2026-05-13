@@ -11,6 +11,7 @@ pytest-asyncio==0.23.6
 pytest-xdist==3.6.1
 allure-pytest==2.15.0
 greenlet==3.2.3
+requests>=2.31.0
 
 # Visual regression testing dependencies
 Pillow>=11.0.0
