@@ -65,7 +65,7 @@ source .venv/bin/activate
 
 ```cmd
 python -m venv .venv
-.venv\Scriptsctivate
+.venv\Scripts\activate
 ```
 
 **Windows (PowerShell):**
@@ -82,7 +82,6 @@ python -m venv .venv
 ```sh
 pip install --upgrade pip
 pip install -r requirements_with_versions.txt
-pip install ollama
 ```
 
 Make sure your `requirements_with_versions.txt` includes:
@@ -250,11 +249,7 @@ await api_mocker.mock_get("**/api/users", {"users": [{"id": 1}]})
 
 ## 14. AI Self-Healing
 
-Install Ollama Python library
-
-```sh
-pip install ollama
-```
+The Ollama Python library is installed as part of `requirements_with_versions.txt`.
 
 # Ollama Model Setup for AI Healing
 
@@ -333,7 +328,7 @@ Screenshot saved and attached to Allure: screenshots/tests_login_test_login.py_t
 💾 Ollama healed test saved: ai_healing_reports/test_login_direct_valid_credentials_20250729_213826_ollama_healed.py
 ```
 
-You can see some example reports and attempts at fixing the files in the example_ai_reports folder
+You can see some example reports and attempts at fixing the files in `test_artifacts/ai/ai_healing_reports/`
 
 
 ## 15. BrowserStack Integration
@@ -537,6 +532,8 @@ python onefilellm.py https://github.com/philmcneely/playwright-ai-framework
 You can also run the script against a local repository by providing the local path instead of a GitHub URL, for example:
 ```python
 python onefilellm.py /path/to/your/local/repo
+```
+
 ---
 
 
@@ -555,22 +552,6 @@ python onefilellm.py /path/to/your/local/repo
 
 ---
 
-## Directory Structure
-
-- `.env.dev`, `.env.test`, `.env.prod` — Environment variable files
-- `conftest.py` — Has config settings and soem global objects/methods
-- `pytest.ini` — Pytest configurations and startup settings
-- `requirements_with_versions.txt` — Python dependencies
-- `allure-report/` — Generated Allure HTML report
-- `allure-results/` — Allure raw results
-- `example_ai_reports/` — Example AI Reports and "fixed" code
-- `pages/` — Page object model files go here
-- `utils/` — Utilities go here
-- `data/` — Test data goes here
-- `config/` — Settings files here
-- `tests/` — Test files go here
-- `screenshots/` — Test screenshots
-
 ## Directory Structure 📂
 
 ```text
@@ -582,20 +563,12 @@ python onefilellm.py /path/to/your/local/repo
 │
 ├── 📂 test_artifacts/                  — Test artifacts
 │   ├── 📂 visual/
-│   │   ├── 📂 example                  — Example visual regression results
-│   │   │   ├── 📂 visual_baselines     — Baseline screenshots
-│   │   │   ├── 📂 visual_current       — Current screenshots
-│   │   │   ├── 📂 visual_diffs         — Diff images
-│   │   ├── 📂 visual_baselines         — Baseline screenshots
-│   │   ├── 📂 visual_current           — Current screenshots
-│   │   ├── 📂 visual_diffs             — Diff images
+│   │   ├── 📂 visual_baselines         — Baseline screenshots (committed)
+│   │   ├── 📂 visual_current           — Current screenshots (gitignored)
+│   │   ├── 📂 visual_diffs             — Diff images (gitignored)
 │   ├── 📂 ai/
-│   │   ├── 📂 ai_healing_reports       — AI healing reports
-│   │   ├── 📂 example_ai_reports/      — Example AI reports
-│   ├── 📂 allure/
-│   │   ├── 📂 allure-report            — Generated Allure HTML report
-│   │   ├── 📂 allure-results           — Raw test results
-│   │   ├── 📂 screenshots              — Test screenshots
+│   │   └── 📂 ai_healing_reports       — AI healing reports (with committed examples)
+│   ├── 📂 allure/                      — Allure reports/results/screenshots (gitignored)
 │   ├── 📂 observability/
 │   │   ├── 📄 metrics.jsonl            — Per-test JSONL metrics
 │   │   ├── 📄 summary.json             — Aggregated summary
@@ -609,8 +582,10 @@ python onefilellm.py /path/to/your/local/repo
 ├── 📂 data/                            — Test data
 ├── 📂 config/                          — Settings
 ├── 📂 tests/                           — Test files
+│   ├── 📂 login/                       — Login functional/security tests
 │   ├── 📂 visual_regression/           — Visual regression tests
-│   └── 📂 api/                         — API mocking tests
+│   ├── 📂 api/                         — API mocking tests
+│   └── 📂 unit/                        — Framework utility unit tests
 ```
 
 ---

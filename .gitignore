@@ -24,11 +24,9 @@ coverage.xml
 .DS_Store
 test-results/
 playwright-report/
-test_artifacts/allure/allure-results/
-test_artifacts/allure/allure-report/
-test_artifacts/allure/screenshots/
+test_artifacts/allure/
 test_artifacts/ai/ai_healing_reports/
-test_artifacts/visual/visual_baselines/
+# visual_baselines/ is intentionally tracked (needed for visual regression tests)
 test_artifacts/visual/visual_current/
 test_artifacts/visual/visual_diffs/
 videos/

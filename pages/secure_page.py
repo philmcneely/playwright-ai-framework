@@ -16,7 +16,7 @@ Features:
 
 Usage Example:
     from pages.secure_page import SecurePage
-    
+
     @pytest.mark.asyncio
     async def test_secure_area_access(page):
         secure_page = SecurePage(page)
@@ -36,13 +36,16 @@ Author: PMAC
 Site: The Internet (https://the-internet.herokuapp.com)
 ===============================================================================
 """
+
+from config.settings import settings
+
 from .base_page import BasePage
 
 
 class SecurePage(BasePage):
     def __init__(self, page):
         super().__init__(page)
-        self.url = "https://the-internet.herokuapp.com/secure"
+        self.url = f"{settings.BASE_URL}/secure"
 
     # =====================================
     # Navigation Methods

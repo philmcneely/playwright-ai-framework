@@ -285,7 +285,7 @@ class OllamaAIHealingService:
                     parsed = json.loads(cleaned)
                     print("✅ Successfully parsed cleaned JSON")
                     return parsed
-            except:
+            except Exception:
                 pass
 
             # Strategy 6: Try to extract key information manually
@@ -303,7 +303,7 @@ class OllamaAIHealingService:
                 }
                 print("🔧 Manually extracted key information")
                 return manual_parse
-            except:
+            except Exception:
                 pass
 
             # Final fallback: Return raw response in structured format
@@ -388,7 +388,7 @@ class OllamaAIHealingService:
         """
         try:
             return inspect.getsource(test_function)
-        except:
+        except Exception:
             return f"# Could not extract source for {test_function.__name__}"
 
     async def generate_healing_report(self, test_name, ai_response, context):
@@ -486,9 +486,9 @@ class OllamaAIHealingService:
         print(f"📄 Full Report: {report_file}")
 
         if ai_response.get('confidence', 0) > self.confidence_threshold:
-            print(f"✅ High confidence - Review the healed test")
+            print("✅ High confidence - Review the healed test")
         else:
-            print(f"⚠️  Low confidence - Manual review recommended")
+            print("⚠️  Low confidence - Manual review recommended")
 
         print(f"{'='*80}\n")
 

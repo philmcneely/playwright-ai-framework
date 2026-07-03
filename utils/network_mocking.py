@@ -305,18 +305,18 @@ class NetworkMocker:
         """
         Print summary of network activity for debugging.
         """
-        print(f"\n📊 Network Activity Summary:")
+        print("\n📊 Network Activity Summary:")
         print(f"   Requests intercepted: {len(self.request_log)}")
         print(f"   Responses mocked: {len(self.response_log)}")
         print(f"   Active mocks: {len(self.mocked_routes)}")
         
         if self.request_log:
-            print(f"\n📥 Recent Requests:")
+            print("\n📥 Recent Requests:")
             for req in self.request_log[-5:]:  # Show last 5
                 print(f"   {req['method']} {req['url']}")
                 
         if self.response_log:
-            print(f"\n📤 Recent Responses:")
+            print("\n📤 Recent Responses:")
             for resp in self.response_log[-5:]:  # Show last 5
                 print(f"   {resp['status']} {resp['url']}")
 

@@ -5,7 +5,7 @@ Playwright Browser Configuration and Page Fixture with Auto AI Healing
 
 This module provides the core Playwright browser configuration and page fixture
 for automated testing across multiple browsers (Chromium, Firefox, WebKit).
-It handles browser selection, headless mode configuration, and provides a 
+It handles browser selection, headless mode configuration, and provides a
 reusable async page fixture for all test modules.
 
 NEW: Automatic AI healing is applied to ALL tests without needing decorators!
@@ -52,7 +52,7 @@ Dependencies:
     - playwright.async_api: Async Playwright API
     - pytest_asyncio: Async test support
     - config.settings: Application configuration management
-    - utils.ai_healing_decorator_fixed: AI healing service
+    - utils.ai_healing: AI healing service
     - requests: For Ollama service health checks
 
 Author: PMAC
@@ -76,7 +76,11 @@ from utils.browserstack import is_browserstack_enabled
 from utils.debug import debug_print
 from playwright.async_api import async_playwright
 from utils.jira_client import get_jira_client, extract_ticket_id, JiraTestResult
-from utils.test_observability import get_observability_collector, TestMetric, categorize_error
+from utils.test_observability import (
+    get_observability_collector,
+    TestMetric,
+    categorize_error,
+)
 
 # Import the visual regression fixture
 from utils.visual_regression import visual_regression
@@ -93,16 +97,20 @@ _ai_healing_lock = threading.Lock()
 
 ollama_service = get_ollama_service()
 
+
 class ElementNotFoundException(Exception):
     """
     Custom exception raised when a Playwright Locator times out waiting for an element.
     This helps AI healing to detect element-not-found scenarios explicitly.
     """
+
     pass
+
 
 # ------------------------------------------------------------------------------
 # Function: get_selector
 # ------------------------------------------------------------------------------
+
 
 def get_selector(locator):
     """
@@ -117,11 +125,13 @@ def get_selector(locator):
     """
     return getattr(locator, "_selector", repr(locator))
 
+
 # ------------------------------------------------------------------------------
 # Function: patched_wait_for
 # ------------------------------------------------------------------------------
 
 _original_wait_for = Locator.wait_for
+
 
 async def patched_wait_for(self, state="visible", timeout=None):
     """
@@ -146,6 +156,7 @@ async def patched_wait_for(self, state="visible", timeout=None):
             f"Element '{selector}' not found after waiting for state '{state}'"
         )
 
+
 Locator.wait_for = patched_wait_for
 
 # ------------------------------------------------------------------------------
@@ -153,6 +164,7 @@ Locator.wait_for = patched_wait_for
 # ------------------------------------------------------------------------------
 
 _original_click = Locator.click
+
 
 async def patched_click(self, *args, timeout=None, **kwargs):
     """
@@ -178,6 +190,7 @@ async def patched_click(self, *args, timeout=None, **kwargs):
             f"Element '{selector}' not found (click timeout after {timeout}ms)"
         )
 
+
 Locator.click = patched_click
 
 # ------------------------------------------------------------------------------
@@ -185,6 +198,7 @@ Locator.click = patched_click
 # ------------------------------------------------------------------------------
 
 _original_fill = Locator.fill
+
 
 async def patched_fill(self, *args, timeout=None, **kwargs):
     """
@@ -210,11 +224,13 @@ async def patched_fill(self, *args, timeout=None, **kwargs):
             f"Element '{selector}' not found (fill timeout after {timeout}ms)"
         )
 
+
 Locator.fill = patched_fill
 
 # ------------------------------------------------------------------------------
 # Fixture: page
 # ------------------------------------------------------------------------------
+
 
 @pytest_asyncio.fixture
 async def page():
@@ -240,9 +256,7 @@ async def page():
             "browserstack.username": os.getenv("BROWSERSTACK_USERNAME"),
             "browserstack.accessKey": os.getenv("BROWSERSTACK_ACCESS_KEY"),
         }
-        ws_endpoint = (
-            f"wss://cdp.browserstack.com/playwright?caps={json.dumps(caps)}"
-        )
+        ws_endpoint = f"wss://cdp.browserstack.com/playwright?caps={json.dumps(caps)}"
         async with async_playwright() as p:
             browser = await p.chromium.connect(ws_endpoint)
             context = await browser.new_context()
@@ -271,6 +285,7 @@ async def page():
             yield page
             await browser.close()
 
+
 # ------------------------------------------------------------------------------
 # Hook: pytest_runtest_makereport
 # ------------------------------------------------------------------------------
@@ -291,7 +306,9 @@ def pytest_runtest_makereport(item, call):
     if not ollama_service.enabled:
         return
 
-    debug_print(f"DEBUG: rep.when={rep.when}, rep.failed={rep.failed}, item={item.nodeid}")
+    debug_print(
+        f"DEBUG: rep.when={rep.when}, rep.failed={rep.failed}, item={item.nodeid}"
+    )
 
     setattr(item, "rep_" + rep.when, rep)
 
@@ -304,18 +321,24 @@ def pytest_runtest_makereport(item, call):
             _ai_healing_fail_counts[test_key] += 1
             fail_count = _ai_healing_fail_counts[test_key]
 
-        debug_print(f"DEBUG: {test_key} fail_count={fail_count} (max_reruns={max_reruns})")
+        debug_print(
+            f"DEBUG: {test_key} fail_count={fail_count} (max_reruns={max_reruns})"
+        )
 
         # Capture context on EVERY failure (for screenshot, DOM, etc.)
         page = find_page_object(item)
         error_message = str(call.excinfo.value) if call.excinfo else "Unknown error"
+        screenshot_path = None
 
         # Use async capture_failure_context for full context (including DOM)
         if page:
             try:
                 context, screenshot_path = asyncio.get_event_loop().run_until_complete(
                     ollama_service.capture_failure_context(
-                        page, error_message, item.name, getattr(item.function, "__func__", None)
+                        page,
+                        error_message,
+                        item.name,
+                        getattr(item.function, "__func__", None),
                     )
                 )
             except Exception as e:
@@ -323,8 +346,12 @@ def pytest_runtest_makereport(item, call):
                 context = {
                     "test_name": item.name,
                     "error_message": error_message,
-                    "error_type": type(call.excinfo.value).__name__ if call.excinfo else "Unknown",
-                    "test_docstring": getattr(getattr(item.function, "__func__", None), "__doc__", ""),
+                    "error_type": type(call.excinfo.value).__name__
+                    if call.excinfo
+                    else "Unknown",
+                    "test_docstring": getattr(
+                        getattr(item.function, "__func__", None), "__doc__", ""
+                    ),
                     "capture_error": str(e),
                     "dom": f"DOM not available due to error: {e}",
                 }
@@ -332,8 +359,12 @@ def pytest_runtest_makereport(item, call):
             context = {
                 "test_name": item.name,
                 "error_message": error_message,
-                "error_type": type(call.excinfo.value).__name__ if call.excinfo else "Unknown",
-                "test_docstring": getattr(getattr(item.function, "__func__", None), "__doc__", ""),
+                "error_type": type(call.excinfo.value).__name__
+                if call.excinfo
+                else "Unknown",
+                "test_docstring": getattr(
+                    getattr(item.function, "__func__", None), "__doc__", ""
+                ),
                 "capture_error": "No page object found",
                 "dom": "DOM not available: No page object found",
             }
@@ -342,13 +373,13 @@ def pytest_runtest_makereport(item, call):
         original_test_code = ""
         try:
             test_file = item.fspath
-            with open(test_file, 'r') as f:
+            with open(test_file, "r") as f:
                 original_test_code = f.read()
         except Exception as e:
             print(f"Warning: Could not read test file: {e}")
 
         # Store context for later AI healing
-        if not hasattr(ollama_service, '_pending_contexts'):
+        if not hasattr(ollama_service, "_pending_contexts"):
             ollama_service._pending_contexts = {}
         ollama_service._pending_contexts[test_key] = {
             "test_name": item.name,
@@ -363,32 +394,36 @@ def pytest_runtest_makereport(item, call):
                 allure.attach(
                     image_file.read(),
                     name=f"AI Healing Screenshot: {item.name}",
-                    attachment_type=allure.attachment_type.PNG
-        )
+                    attachment_type=allure.attachment_type.PNG,
+                )
 
         # Only trigger AI healing on the final failure
         if fail_count > max_reruns:
             print(f"\n🧠 Final failure detected for {item.name}, triggering AI healing")
-            if hasattr(ollama_service, '_pending_contexts'):
+            if hasattr(ollama_service, "_pending_contexts"):
                 context_data = ollama_service._pending_contexts.get(test_key)
                 if not context_data:
                     context_data = ollama_service._pending_contexts.get(item.name)
                 if context_data and ollama_service.enabled:
                     if not ensure_ollama_ready():
-                        print("🧠 AI healing skipped - Ollama service or model unavailable")
+                        print(
+                            "🧠 AI healing skipped - Ollama service or model unavailable"
+                        )
                         return
                     try:
                         ai_response = ollama_service.call_ollama_healing(
                             context_data["context"],
                             context_data["original_test_code"],
-                            context_data["screenshot_path"]
+                            context_data["screenshot_path"],
                         )
                         if ai_response:
-                            asyncio.run(ollama_service.generate_healing_report(
-                                context_data["test_name"],
-                                ai_response,
-                                context_data["context"]
-                            ))
+                            asyncio.run(
+                                ollama_service.generate_healing_report(
+                                    context_data["test_name"],
+                                    ai_response,
+                                    context_data["context"],
+                                )
+                            )
                         else:
                             print(f"🧠 Ollama analysis failed for {item.name}")
                         # Clean up
@@ -404,13 +439,15 @@ def pytest_runtest_makereport(item, call):
                     if not ollama_service.enabled:
                         print(f"🧠 AI healing disabled for {item.name}")
             else:
-                print(f"🧠 No pending contexts found")
+                print("🧠 No pending contexts found")
             # Clean up fail count
             with _ai_healing_lock:
                 if test_key in _ai_healing_fail_counts:
                     del _ai_healing_fail_counts[test_key]
         else:
-            print(f"🔄 Test {item.name} will be retried (attempt {fail_count}), skipping AI healing")
+            print(
+                f"🔄 Test {item.name} will be retried (attempt {fail_count}), skipping AI healing"
+            )
 
 
 # ------------------------------------------------------------------------------
@@ -423,10 +460,31 @@ observability_collector = get_observability_collector()
 _test_start_times: dict[str, float] = {}
 _observability_retry_counts: dict[str, int] = defaultdict(int)
 
+# TestReport objects don't carry the pytest config, so capture it at startup
+# for use in pytest_runtest_logreport.
+_pytest_config = None
+
+
+def pytest_configure(config):
+    global _pytest_config
+    _pytest_config = config
+
+
+def _get_test_tags(report):
+    """Return the registered marker names applied to this test."""
+    if _pytest_config is None:
+        return []
+    registered = {
+        line.split(":", 1)[0].split("(", 1)[0].strip()
+        for line in _pytest_config.getini("markers")
+    }
+    return sorted(registered.intersection(report.keywords))
+
 
 # ------------------------------------------------------------------------------
 # Hook: pytest_runtest_setup — track test start time
 # ------------------------------------------------------------------------------
+
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item):
@@ -436,6 +494,7 @@ def pytest_runtest_setup(item):
 # ------------------------------------------------------------------------------
 # Hook: pytest_runtest_logreport — Jira reporting + observability
 # ------------------------------------------------------------------------------
+
 
 @pytest.hookimpl(trylast=True)
 def pytest_runtest_logreport(report):
@@ -448,12 +507,14 @@ def pytest_runtest_logreport(report):
         _observability_retry_counts[nodeid] += 1
 
     max_reruns = 0
-    try:
-        max_reruns = report.config.getoption("reruns") or 0
-    except (ValueError, AttributeError):
-        pass
+    if _pytest_config is not None:
+        max_reruns = _pytest_config.getoption("reruns", default=0) or 0
 
-    is_final = report.passed or report.skipped or _observability_retry_counts.get(nodeid, 0) > max_reruns
+    is_final = (
+        report.passed
+        or report.skipped
+        or _observability_retry_counts.get(nodeid, 0) > max_reruns
+    )
 
     if not is_final:
         return
@@ -466,14 +527,18 @@ def pytest_runtest_logreport(report):
         error_msg = str(report.longrepr) if report.failed else None
         metric = TestMetric(
             test_id=nodeid,
-            test_name=report.head_line if hasattr(report, "head_line") else nodeid.split("::")[-1],
+            test_name=report.head_line
+            if hasattr(report, "head_line")
+            else nodeid.split("::")[-1],
             suite="::".join(nodeid.split("::")[:-1]),
-            status="passed" if report.passed else ("skipped" if report.skipped else "failed"),
+            status="passed"
+            if report.passed
+            else ("skipped" if report.skipped else "failed"),
             duration_ms=duration_ms,
             retry_count=_observability_retry_counts.get(nodeid, 0),
             browser=browser,
             error_category=categorize_error(error_msg),
-            tags=[m.name for m in report.config.getini("markers") if hasattr(report, "markers")] if hasattr(report, "markers") else [],
+            tags=_get_test_tags(report),
         )
         observability_collector.record(metric)
 
@@ -481,7 +546,11 @@ def pytest_runtest_logreport(report):
     if jira_client.enabled:
         ticket_id = extract_ticket_id(nodeid)
         if ticket_id:
-            status = "passed" if report.passed else ("skipped" if report.skipped else "failed")
+            status = (
+                "passed"
+                if report.passed
+                else ("skipped" if report.skipped else "failed")
+            )
             result = JiraTestResult(
                 ticket_id=ticket_id,
                 test_name=nodeid.split("::")[-1],
@@ -499,6 +568,7 @@ def pytest_runtest_logreport(report):
 # ------------------------------------------------------------------------------
 # Hook: pytest_sessionfinish — write observability report
 # ------------------------------------------------------------------------------
+
 
 def pytest_sessionfinish(session, exitstatus):
     if observability_collector.enabled:

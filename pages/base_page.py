@@ -16,12 +16,12 @@ Features:
 
 Usage Example:
     from pages.base_page import BasePage
-    
+
     class LoginPage(BasePage):
         def __init__(self, page):
             super().__init__(page)
-            self.url = "https://the-internet.herokuapp.com/login"
-            
+            self.url = f"{settings.BASE_URL}/login"
+
         async def load(self):
             await self.navigate_to(self.url)
 
@@ -35,6 +35,7 @@ Author: PMAC
 Date: [2025-07-27]
 ===============================================================================
 """
+
 from playwright.async_api import Page
 
 

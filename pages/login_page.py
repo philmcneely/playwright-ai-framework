@@ -15,7 +15,7 @@ Features:
 
 Usage Example:
     from pages.login_page import LoginPage
-    
+
     @pytest.mark.asyncio
     async def test_valid_login(page):
         login_page = LoginPage(page)
@@ -23,7 +23,7 @@ Usage Example:
         await login_page.enter_username("tomsmith")
         await login_page.enter_password("SuperSecretPassword!")
         await login_page.click_login()
-        
+
         # Verify successful login
         assert await login_page.is_login_successful()
 
@@ -37,13 +37,16 @@ Author: PMAC
 Site: The Internet (https://the-internet.herokuapp.com)
 ===============================================================================
 """
+
+from config.settings import settings
+
 from .base_page import BasePage
 
 
 class LoginPage(BasePage):
     def __init__(self, page):
         super().__init__(page)
-        self.url = "https://the-internet.herokuapp.com/login"
+        self.url = f"{settings.BASE_URL}/login"
 
     # =====================================
     # Navigation Methods
