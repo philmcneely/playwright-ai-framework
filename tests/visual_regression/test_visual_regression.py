@@ -338,7 +338,7 @@ async def test_cleanup_visual_files():
     current_files = os.listdir("test_artifacts/visual/visual_current") if os.path.exists("test_artifacts/visual/visual_current") else []
     diff_files = os.listdir("test_artifacts/visual/visual_diffs") if os.path.exists("test_artifacts/visual/visual_diffs") else []
 
-    print(f"\n📁 Visual regression files:")
+    print("\n📁 Visual regression files:")
     print(f"   Baselines: {baseline_files}")
     print(f"   Current: {current_files}")
     print(f"   Diffs: {diff_files}")

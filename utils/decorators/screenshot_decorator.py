@@ -28,7 +28,6 @@ def screenshot_on_failure(func):
         
         # Find page object using the same scalable logic
         page = None
-        page_source = None
         
         # Loop through all kwargs to find page objects
         for key, value in kwargs.items():
@@ -36,19 +35,16 @@ def screenshot_on_failure(func):
                 # Check if this is the 'app' fixture with a page attribute
                 if key == "app" and hasattr(value, "page"):
                     page = value.page
-                    page_source = f"app fixture"
                     break
                 
                 # Check if this is a page object fixture (ends with '_page')
                 elif key.endswith("_page") and hasattr(value, "page"):
                     page = value.page
-                    page_source = f"{key} fixture"
                     break
                 
                 # Check if this is the raw Playwright 'page' fixture
                 elif key == "page":
                     page = value
-                    page_source = f"page fixture"
                     break
                     
             except Exception:
@@ -87,7 +83,6 @@ def screenshot_on_failure(func):
                     )
                     
                     print(f"Screenshot saved and attached to Allure: {screenshot_path}")
-                    #print(f"Page object found via: {page_source}")
                     
                 except Exception as screenshot_error:
                     print(f"Failed to capture screenshot: {screenshot_error}")
