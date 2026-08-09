@@ -16,7 +16,7 @@ Features:
     - Thread-safe context storage for parallel test runs
 
 Environment Variables:
-    OLLAMA_MODEL: Ollama model to use (default: llama3.1:8b)
+    OLLAMA_MODEL: Ollama model to use (default: qwen3:8b)
     AI_HEALING_ENABLED: Enable AI healing (true|false, default: false)
     AI_HEALING_CONFIDENCE: Confidence threshold for healed tests (default: 0.7)
     OLLAMA_HOST: Ollama server URL (default: http://localhost:11434)
@@ -71,7 +71,7 @@ class OllamaAIHealingService:
     """
 
     def __init__(self):
-        self.model = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+        self.model = os.getenv("OLLAMA_MODEL", "qwen3:8b")
         self.enabled = os.getenv("AI_HEALING_ENABLED", "false").lower() == "true"
         self.confidence_threshold = float(os.getenv("AI_HEALING_CONFIDENCE", "0.7"))
         self.ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
