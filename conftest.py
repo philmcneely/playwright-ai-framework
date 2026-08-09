@@ -72,6 +72,7 @@ import threading
 from collections import defaultdict
 import asyncio
 from utils.ai_healing import get_ollama_service, find_page_object, ensure_ollama_ready
+from utils.api_capture import APICapture
 from utils.browserstack import is_browserstack_enabled
 from utils.debug import debug_print
 from playwright.async_api import async_playwright
@@ -262,6 +263,10 @@ async def page():
             context = await browser.new_context()
             page = await context.new_page()
             print("\n Using BrowserStack cloud browser")
+            api_capture = APICapture()
+            page.on("request", api_capture.on_request)
+            page.on("response", api_capture.on_response)
+            page._api_capture = api_capture
             yield page
             await browser.close()
     else:
@@ -282,6 +287,10 @@ async def page():
             context = await browser.new_context()
             page = await context.new_page()
             print(f"\n Using {browser_name} browser (headless={headless})")
+            api_capture = APICapture()
+            page.on("request", api_capture.on_request)
+            page.on("response", api_capture.on_response)
+            page._api_capture = api_capture
             yield page
             await browser.close()
 
@@ -329,6 +338,16 @@ def pytest_runtest_makereport(item, call):
         page = find_page_object(item)
         error_message = str(call.excinfo.value) if call.excinfo else "Unknown error"
         screenshot_path = None
+
+        # Attach captured API requests on failure
+        if page and hasattr(page, '_api_capture'):
+            api_data = page._api_capture.to_json()
+            if api_data and api_data != "[]":
+                allure.attach(
+                    api_data,
+                    name=f"API Requests: {item.name}",
+                    attachment_type=allure.attachment_type.JSON
+                )
 
         # Use async capture_failure_context for full context (including DOM)
         if page:
