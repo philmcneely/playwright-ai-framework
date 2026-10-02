@@ -272,7 +272,7 @@ ollama pull llava:13b
 ### For text-only analysis (faster, smaller):
 
 ```sh
-ollama pull llama3.1:8b
+ollama pull qwen3:8b
 # or
 ollama pull llama3.2:3b
 ```
