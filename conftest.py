@@ -28,7 +28,7 @@ Environment Variables:
     BROWSER: Specifies which browser to use (chromium|firefox|webkit)
     HEADLESS: Controls headless mode (true|false)
     OLLAMA_HOST: Ollama server URL (default: http://localhost:11434)
-    OLLAMA_MODEL: Model to use for AI healing (default: llama3.1:8b)
+    OLLAMA_MODEL: Model to use for AI healing (default: qwen3:8b)
 
 Usage Examples:
     # Run tests with default browser and AI healing
