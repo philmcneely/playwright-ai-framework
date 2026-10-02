@@ -36,6 +36,7 @@ Date: [2025-09-03]
 """
 
 import pytest
+from config.settings import settings
 from data.test_data import INVALID_USERS, EXPECTED_MESSAGES
 from utils.decorators.screenshot_decorator import screenshot_on_failure
 from utils.debug import debug_print
@@ -88,8 +89,10 @@ async def test_login_invalid_username_via_home(app):
     """
     debug_print("Testing invalid username via home navigation")
     
-    # Navigate to home page first, then to login
-    await app.page.goto("https://the-internet.herokuapp.com")
+    # Navigate to home page first, then to login (use configured BASE_URL,
+    # not a hardcoded live URL, so this runs against any target incl. CI's
+    # the-internet container).
+    await app.page.goto(settings.BASE_URL)
     await app.page.click('a[href="/login"]')
     
     # Verify we're on login page
