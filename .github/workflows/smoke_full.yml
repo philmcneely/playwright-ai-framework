@@ -98,6 +98,11 @@ jobs:
   smoke:
     runs-on: ubuntu-latest
     needs: setup
+    services:
+      theinternet:
+        image: gprestes/the-internet
+        ports:
+          - 5000:5000
     env:
       USER_PM_EMAIL: ${{ secrets.USER_PM_EMAIL }}
       USER_PM_PASSWORD: ${{ secrets.USER_PM_PASSWORD }}
@@ -117,7 +122,7 @@ jobs:
       USER_COACH_FIRST: ${{ secrets.USER_COACH_FIRST }}
       USER_COACH_LAST: ${{ secrets.USER_COACH_LAST }}
       USER_COACH_INITIALS: ${{ secrets.USER_COACH_INITIALS }}
-      BASE_URL: ${{ secrets.BASE_URL }}
+      BASE_URL: http://localhost:5000
       API_LOGIN_URL: ${{ secrets.API_LOGIN_URL }}
       AI_HEALING_ENABLED: ${{ secrets.AI_HEALING_ENABLED }}  
       AI_HEALING_CONFIDENCE: ${{ secrets.AI_HEALING_CONFIDENCE }}
@@ -233,6 +238,11 @@ jobs:
 
   full:
     runs-on: ubuntu-latest
+    services:
+      theinternet:
+        image: gprestes/the-internet
+        ports:
+          - 5000:5000
     needs: [setup, smoke]
     timeout-minutes: 60
     env:
@@ -254,7 +264,7 @@ jobs:
       USER_COACH_FIRST: ${{ secrets.USER_COACH_FIRST }}
       USER_COACH_LAST: ${{ secrets.USER_COACH_LAST }}
       USER_COACH_INITIALS: ${{ secrets.USER_COACH_INITIALS }}
-      BASE_URL: ${{ secrets.BASE_URL }}
+      BASE_URL: http://localhost:5000
       API_LOGIN_URL: ${{ secrets.API_LOGIN_URL }}
       AI_HEALING_ENABLED: ${{ secrets.AI_HEALING_ENABLED }}  
       AI_HEALING_CONFIDENCE: ${{ secrets.AI_HEALING_CONFIDENCE }}

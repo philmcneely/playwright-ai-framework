@@ -56,21 +56,31 @@ class APICapture:
         )
         self._pending[request.url] = captured
 
-    def on_response(self, response) -> None:
-        """Playwright response event handler."""
-        if response.url not in self._pending:
-            return
-        captured = self._pending.pop(response.url)
-        captured.status = response.status
-        captured.response_headers = dict(response.headers) if response.headers else {}
+    async def on_response(self, response) -> None:
+        """Playwright response event handler.
+
+        Async because the framework uses Playwright's async API, where
+        ``response.body()`` is a coroutine that must be awaited. Everything is
+        best-effort: a response can be torn down with its page mid-flight, so no
+        access is allowed to escape and disturb the running test.
+        """
         try:
-            body = response.body()
-            if isinstance(body, bytes):
-                body = body.decode("utf-8", errors="replace")
-            captured.response_body = body[:10240]  # cap at 10KB
+            if response.url not in self._pending:
+                return
+            captured = self._pending.pop(response.url)
+            captured.status = response.status
+            captured.response_headers = dict(response.headers) if response.headers else {}
+            try:
+                body = await response.body()
+                if isinstance(body, bytes):
+                    body = body.decode("utf-8", errors="replace")
+                captured.response_body = body[:10240]  # cap at 10KB
+            except Exception:
+                captured.response_body = "<could not read body>"
+            self.requests.append(captured)
         except Exception:
-            captured.response_body = "<could not read body>"
-        self.requests.append(captured)
+            # Response no longer bound to the connection — drop it silently.
+            pass
 
     def to_json(self) -> str:
         """Serialize all captured requests to JSON."""
