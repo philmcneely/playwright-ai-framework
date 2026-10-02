@@ -44,3 +44,8 @@ requirements.*
 utils/helpers.py
 run_tests.sh
 ai_healing_reports/
+
+# Stability index runtime data
+data/stability_history.json
+data/stability_history.lock
+data/stability_history.json.tmp

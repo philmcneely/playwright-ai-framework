@@ -88,6 +88,12 @@ from utils.visual_regression import visual_regression
 # Import the api mocking fixture
 from utils.network_mocking import api_mocker
 
+# QA quick-wins integrations
+from pathlib import Path
+from utils.api_capture import APICapture
+from utils.zap_integration import ZAPIntegration
+from utils.stability_index import record_result, get_unstable_tests
+
 # Pytest fixtures (prevents auto-removal)
 pytest_fixtures = [visual_regression, api_mocker]
 
@@ -96,6 +102,9 @@ _ai_healing_fail_counts = defaultdict(int)
 _ai_healing_lock = threading.Lock()
 
 ollama_service = get_ollama_service()
+
+# OWASP ZAP passive-scan integration (disabled unless ZAP_ENABLED=true)
+zap = ZAPIntegration()
 
 
 class ElementNotFoundException(Exception):
@@ -262,6 +271,10 @@ async def page():
             context = await browser.new_context()
             page = await context.new_page()
             print("\n Using BrowserStack cloud browser")
+            api_capture = APICapture()
+            page.on("request", api_capture.on_request)
+            page.on("response", api_capture.on_response)
+            page._api_capture = api_capture
             yield page
             await browser.close()
     else:
@@ -271,6 +284,10 @@ async def page():
             headless = os.getenv("HEADLESS", str(settings.HEADLESS)).lower() == "true"
             browser_options = settings.get_browser_options()
             browser_options["headless"] = headless
+            # Route traffic through OWASP ZAP if enabled and running
+            if zap.enabled and zap.is_running():
+                browser_options.update(zap.get_browser_proxy_config())
+                print(f"\nZAP proxy enabled: {zap.proxy_url}")
             if browser_name == "chromium":
                 browser = await p.chromium.launch(**browser_options)
             elif browser_name == "firefox":
@@ -282,6 +299,10 @@ async def page():
             context = await browser.new_context()
             page = await context.new_page()
             print(f"\n Using {browser_name} browser (headless={headless})")
+            api_capture = APICapture()
+            page.on("request", api_capture.on_request)
+            page.on("response", api_capture.on_response)
+            page._api_capture = api_capture
             yield page
             await browser.close()
 
@@ -329,6 +350,16 @@ def pytest_runtest_makereport(item, call):
         page = find_page_object(item)
         error_message = str(call.excinfo.value) if call.excinfo else "Unknown error"
         screenshot_path = None
+
+        # Attach captured API requests/responses on failure (QA-19)
+        if page is not None and hasattr(page, "_api_capture"):
+            api_data = page._api_capture.to_json()
+            if api_data and api_data != "[]":
+                allure.attach(
+                    api_data,
+                    name=f"API Requests: {item.name}",
+                    attachment_type=allure.attachment_type.JSON,
+                )
 
         # Use async capture_failure_context for full context (including DOM)
         if page:
@@ -503,6 +534,9 @@ def pytest_runtest_logreport(report):
 
     nodeid = report.nodeid
 
+    # Record every call-phase result for the flaky-test stability index (QA-04)
+    record_result(nodeid, report.passed)
+
     if report.failed:
         _observability_retry_counts[nodeid] += 1
 
@@ -574,3 +608,44 @@ def pytest_sessionfinish(session, exitstatus):
     if observability_collector.enabled:
         observability_collector.write_report()
         observability_collector.print_summary()
+
+
+# ------------------------------------------------------------------------------
+# Hook: pytest_collection_modifyitems — quarantine unstable tests (QA-04)
+# ------------------------------------------------------------------------------
+
+
+def pytest_collection_modifyitems(config, items):
+    """Quarantine flaky tests: they still run but are xfail'd so they don't block CI."""
+    threshold = float(os.getenv("STABILITY_THRESHOLD", "0.7"))
+    unstable = get_unstable_tests(threshold)
+    if not unstable:
+        return
+    for item in items:
+        if item.nodeid in unstable:
+            item.add_marker(
+                pytest.mark.xfail(
+                    reason=f"Quarantined: stability below {threshold}",
+                    strict=False,
+                )
+            )
+
+
+# ------------------------------------------------------------------------------
+# Fixture: zap_report_on_finish — write OWASP ZAP passive-scan report (QA-24)
+# ------------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session", autouse=True)
+def zap_report_on_finish():
+    """Generate a ZAP security report after all tests complete, if ZAP is active."""
+    yield
+    if zap.enabled and zap.is_running():
+        report = zap.generate_report()
+        report_path = Path("test_artifacts/zap_report.md")
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(report)
+        print(f"\nZAP report saved: {report_path}")
+        alerts = zap.get_alerts_summary()
+        if alerts.get("High", 0) > 0:
+            print(f"WARNING: ZAP found {alerts['High']} HIGH severity issues!")
