@@ -1,7 +1,13 @@
-"""Seed test for the Playwright test agents (planner/generator).
-
+"""
+===============================================================================
+Seed Test for the Playwright Test Agents (Planner / Generator)
+===============================================================================
 Minimal bootstrap the generator uses as a starting point. Not part of the
 marker-selected CI suites; run ad hoc against a configured BASE_URL.
+
+Author: PMAC
+Site: The Internet (https://the-internet.herokuapp.com)
+===============================================================================
 """
 import os
 
