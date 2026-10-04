@@ -89,6 +89,9 @@ from utils.visual_regression import visual_regression
 # Import the api mocking fixture
 from utils.network_mocking import api_mocker
 
+# Data setup / teardown fixtures
+from utils.data_seeding import cleanup, session_cleanup, api_seed, db_seed
+
 # QA quick-wins integrations
 from pathlib import Path
 from utils.api_capture import APICapture
@@ -96,7 +99,9 @@ from utils.zap_integration import ZAPIntegration
 from utils.stability_index import record_result, get_unstable_tests
 
 # Pytest fixtures (prevents auto-removal)
-pytest_fixtures = [visual_regression, api_mocker]
+pytest_fixtures = [
+    visual_regression, api_mocker, cleanup, session_cleanup, api_seed, db_seed
+]
 
 # Thread-safe dictionary and lock for tracking test failure counts
 _ai_healing_fail_counts = defaultdict(int)

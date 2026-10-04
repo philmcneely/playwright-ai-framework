@@ -162,9 +162,18 @@ Enabled by default via `addopts` in `pytest.ini`:
 | Self-contained HTML report | `results/report.html` |
 | Playwright trace (`retain-on-failure`) | `results/artifacts/<test>.trace.zip` - open with `playwright show-trace` |
 | Screenshot (`only-on-failure`) | `results/artifacts/<test>.png` |
+| Allure results (optional) | `results/allure/` |
 | Console | verbose, short tracebacks |
 
-Allure output (`test_artifacts/allure/`) continues as before. Override any
+**Allure** (`allure-pytest`) writes raw results to `results/allure/` on every
+run; the Allure CLI is only needed to *render* them, so CI does not require it:
+
+```bash
+allure serve results/allure                          # open interactively
+allure generate results/allure -o results/allure-report --clean --single-file
+```
+Install the CLI separately (`brew install allure`, or the release tarball).
+Override any
 option on the command line, e.g. `--tracing=on`, `--screenshot=off`,
 `--junitxml=out.xml`, `--output=some/dir`.
 
@@ -179,3 +188,37 @@ pytest -m smoke --reruns 2 -n auto
 Retried tests show as `RERUN` in the console/HTML report, and traces are kept
 for failed attempts. Mark a single known-flaky test with
 `@pytest.mark.flaky(reruns=3)`.
+
+---
+
+## Data setup & teardown
+
+Reusable fixtures in `utils/data_seeding.py` (registered in `conftest.py`). All
+configuration comes from the environment; nothing is hardcoded, and each helper
+skips or no-ops when it is not configured.
+
+| Env var | Purpose |
+|---|---|
+| `SEED_API_BASE_URL` | Base URL of the API used to seed data (`api_seed` skips the test if unset) |
+| `SEED_API_TOKEN` | Optional bearer token |
+| `SEED_DB_DSN` | Optional DSN: `sqlite:///path.db`, or `postgresql://...` (needs `psycopg`). Unset = `db_seed` is a no-op |
+
+| Fixture | Scope | What it gives you |
+|---|---|---|
+| `cleanup` | function | Registry: `cleanup.register("desc", fn)`; callbacks run **LIFO** after the test, all of them even if one fails (failures are reported together) |
+| `session_cleanup` | session | Same, for shared data removed once at session end |
+| `api_seed` | function | HTTP client: `create(path, payload)` POSTs and schedules `DELETE <path>/<id>` for teardown; also `delete(path)` and `reset(path)` |
+| `db_seed` | function | `run_script(sql)`, `execute(sql, params)`, `reset("table", ...)`; no-op without a DSN |
+
+### Pattern: yield-based setup -> teardown
+```python
+@pytest.fixture
+def order(api_seed, cleanup):
+    created = api_seed.create("/orders", {"sku": "demo"})   # setup; auto-deleted
+    cleanup.register("flush cache", lambda: flush_cache())  # extra teardown
+    yield created                                           # test runs here
+    # code after yield also runs as teardown, pass or fail
+```
+Prefer registering a cleanup right after each create so a failure halfway
+through setup still removes what exists. Example: `tests/test_data_seeding_example.py`
+(`SEED_API_BASE_URL=... pytest -m seeding`).
