@@ -70,7 +70,6 @@ import pytest_asyncio
 from config.settings import settings
 from playwright.async_api import Locator, TimeoutError as PlaywrightTimeoutError
 import threading
-from pathlib import Path
 from collections import defaultdict
 import asyncio
 from utils.ai_healing import get_ollama_service, find_page_object, ensure_ollama_ready
