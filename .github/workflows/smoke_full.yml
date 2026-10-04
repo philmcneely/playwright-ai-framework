@@ -179,14 +179,14 @@ jobs:
           mkdir -p test_artifacts/allure/allure-report
           mkdir -p test_artifacts/allure/allure-results
           mkdir -p test_artifacts/allure/screenshots
-          AI_HEALING_ENABLED=false HEADLESS=true pytest --alluredir=test_artifacts/allure/allure-results --capture=tee-sys --reruns 2 --reruns-delay 5 -m smoke -n auto
+          AI_HEALING_ENABLED=false HEADLESS=true pytest --junitxml=results/junit_smoke_chromium.xml --html=results/report_smoke_chromium.html --output=results/artifacts/chromium --alluredir=test_artifacts/allure/allure-results --capture=tee-sys --reruns 2 --reruns-delay 5 -m smoke -n auto
           
       - name: Run firefox smoke tests
         run: |
           mkdir -p test_artifacts/allure/allure-report
           mkdir -p test_artifacts/allure/allure-results
           mkdir -p test_artifacts/allure/screenshots
-          AI_HEALING_ENABLED=false BROWSER=firefox HEADLESS=true pytest --alluredir=test_artifacts/allure/allure-results --capture=tee-sys --reruns 2 --reruns-delay 5 -m smoke -n auto
+          AI_HEALING_ENABLED=false BROWSER=firefox HEADLESS=true pytest --junitxml=results/junit_smoke_firefox.xml --html=results/report_smoke_firefox.html --output=results/artifacts/firefox --alluredir=test_artifacts/allure/allure-results --capture=tee-sys --reruns 2 --reruns-delay 5 -m smoke -n auto
 
       # Some kind of GHA error runnign webkit, defer for now - common fixes didnt work
       # - name: Run webkit smoke tests
@@ -194,7 +194,7 @@ jobs:
       #     mkdir -p test_artifacts/allure/allure-report
       #     mkdir -p test_artifacts/allure/allure-results
       #     mkdir -p test_artifacts/allure/screenshots
-      #     BROWSER=webkit HEADLESS=true pytest --alluredir=test_artifacts/allure/allure-results --capture=tee-sys --reruns 2 --reruns-delay 5 -m smoke -n auto
+      #     BROWSER=webkit HEADLESS=true pytest --junitxml=results/junit_smoke_webkit.xml --html=results/report_smoke_webkit.html --alluredir=test_artifacts/allure/allure-results --capture=tee-sys --reruns 2 --reruns-delay 5 -m smoke -n auto
 
       - name: Generate Test Results
         if: always()
@@ -329,7 +329,7 @@ jobs:
           mkdir -p test_artifacts/allure/allure-report
           mkdir -p test_artifacts/allure/allure-results
           mkdir -p test_artifacts/allure/screenshots
-          AI_HEALING_ENABLED=false HEADLESS=true pytest --alluredir=test_artifacts/allure/allure-results --capture=tee-sys --reruns 2 --reruns-delay 5 -m  "login and not (smoke or danger)" -n auto
+          AI_HEALING_ENABLED=false HEADLESS=true pytest --junitxml=results/junit_full_chromium.xml --html=results/report_full_chromium.html --output=results/artifacts/chromium --alluredir=test_artifacts/allure/allure-results --capture=tee-sys --reruns 2 --reruns-delay 5 -m  "login and not (smoke or danger)" -n auto
 
       - name: Generate Test Results
         if: always()
@@ -370,7 +370,7 @@ jobs:
           mkdir -p test_artifacts/allure/allure-report
           mkdir -p test_artifacts/allure/allure-results
           mkdir -p test_artifacts/allure/screenshots
-          AI_HEALING_ENABLED=false BROWSER=firefox HEADLESS=true pytest --alluredir=test_artifacts/allure/allure-results --capture=tee-sys --reruns 2 --reruns-delay 5 -m "login and not (smoke or danger)" -n auto
+          AI_HEALING_ENABLED=false BROWSER=firefox HEADLESS=true pytest --junitxml=results/junit_full_firefox.xml --html=results/report_full_firefox.html --output=results/artifacts/firefox --alluredir=test_artifacts/allure/allure-results --capture=tee-sys --reruns 2 --reruns-delay 5 -m "login and not (smoke or danger)" -n auto
 
       - name: Generate Test Results
         if: always()
