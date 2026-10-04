@@ -228,6 +228,14 @@ jobs:
         env:
           JOB_STATUS: ${{ job.status }}
 
+      - name: Upload standard test results (JUnit XML, HTML, traces)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-smoke
+          path: results/
+          retention-days: 14
+
       - name: Upload observability report
         if: always()
         uses: actions/upload-artifact@v4
@@ -395,6 +403,14 @@ jobs:
             })
         env:
           JOB_STATUS: ${{ job.status }}
+
+      - name: Upload standard test results (JUnit XML, HTML, traces)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-full
+          path: results/
+          retention-days: 14
 
       - name: Upload observability report
         if: always()

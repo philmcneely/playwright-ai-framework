@@ -46,6 +46,8 @@ from utils.debug import debug_print
 # Test: Invalid Username (Direct Login)
 # ------------------------------------------------------------------------------
 
+@pytest.mark.negative
+@pytest.mark.p2
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.asyncio
@@ -79,6 +81,8 @@ async def test_login_invalid_username_direct(app):
 # Test: Invalid Username (Home Navigation)
 # ------------------------------------------------------------------------------
 
+@pytest.mark.negative
+@pytest.mark.p2
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.asyncio
@@ -115,6 +119,8 @@ async def test_login_invalid_username_via_home(app):
 # Test: Invalid Password (Direct Login)
 # ------------------------------------------------------------------------------
 
+@pytest.mark.negative
+@pytest.mark.p2
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.asyncio
@@ -145,6 +151,8 @@ async def test_login_invalid_password_direct(app):
 # Test: Empty Username Field
 # ------------------------------------------------------------------------------
 
+@pytest.mark.negative
+@pytest.mark.p2
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.asyncio
@@ -168,6 +176,8 @@ async def test_login_empty_username(app):
 # Test: Empty Password Field
 # ------------------------------------------------------------------------------
 
+@pytest.mark.negative
+@pytest.mark.p2
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.asyncio
@@ -191,6 +201,8 @@ async def test_login_empty_password(app):
 # Test: Both Fields Empty
 # ------------------------------------------------------------------------------
 
+@pytest.mark.negative
+@pytest.mark.p2
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.asyncio
@@ -214,6 +226,8 @@ async def test_login_empty_credentials(app):
 # Test: Form Field Interactions
 # ------------------------------------------------------------------------------
 
+@pytest.mark.negative
+@pytest.mark.p2
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.asyncio
@@ -255,6 +269,9 @@ async def test_form_field_clearing_and_retry(app):
 # Test: Special Characters in Username
 # ------------------------------------------------------------------------------
 
+@pytest.mark.negative
+@pytest.mark.boundary
+@pytest.mark.p2
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.asyncio
@@ -294,6 +311,9 @@ async def test_login_special_characters_username(app):
 # Test: Very Long Input Strings
 # ------------------------------------------------------------------------------
 
+@pytest.mark.negative
+@pytest.mark.boundary
+@pytest.mark.p2
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.asyncio
@@ -322,6 +342,8 @@ async def test_login_very_long_inputs(app):
 # Test: Multiple Failed Attempts
 # ------------------------------------------------------------------------------
 
+@pytest.mark.negative
+@pytest.mark.p2
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.asyncio

@@ -43,6 +43,8 @@ from utils.debug import debug_print
 # Test: SQL Injection in Username Field
 # ------------------------------------------------------------------------------
 
+@pytest.mark.negative
+@pytest.mark.p1
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.security
@@ -82,6 +84,8 @@ async def test_login_sql_injection_username(app):
 # Test: SQL Injection in Password Field
 # ------------------------------------------------------------------------------
 
+@pytest.mark.negative
+@pytest.mark.p1
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.security
@@ -120,6 +124,8 @@ async def test_login_sql_injection_password(app):
 # Test: Cross-Site Scripting (XSS) in Username Field
 # ------------------------------------------------------------------------------
 
+@pytest.mark.negative
+@pytest.mark.p1
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.security
@@ -162,6 +168,8 @@ async def test_login_xss_username(app):
 # Test: Cross-Site Scripting (XSS) in Password Field
 # ------------------------------------------------------------------------------
 
+@pytest.mark.negative
+@pytest.mark.p1
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.security
@@ -199,6 +207,8 @@ async def test_login_xss_password(app):
 # Test: HTML Injection in Username Field
 # ------------------------------------------------------------------------------
 
+@pytest.mark.negative
+@pytest.mark.p1
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.security
@@ -238,6 +248,8 @@ async def test_login_html_injection_username(app):
 # Test: Command Injection in Username Field
 # ------------------------------------------------------------------------------
 
+@pytest.mark.negative
+@pytest.mark.p1
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.security
@@ -278,6 +290,8 @@ async def test_login_command_injection_username(app):
 # Test: Path Traversal in Username Field
 # ------------------------------------------------------------------------------
 
+@pytest.mark.negative
+@pytest.mark.p1
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.security
@@ -317,6 +331,8 @@ async def test_login_path_traversal_username(app):
 # Test: LDAP Injection in Username Field
 # ------------------------------------------------------------------------------
 
+@pytest.mark.negative
+@pytest.mark.p1
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.security
@@ -357,6 +373,9 @@ async def test_login_ldap_injection_username(app):
 # Test: Buffer Overflow Attempt
 # ------------------------------------------------------------------------------
 
+@pytest.mark.negative
+@pytest.mark.boundary
+@pytest.mark.p1
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.security
@@ -385,6 +404,9 @@ async def test_login_buffer_overflow_attempt(app):
 # Test: Unicode and Encoding Attacks
 # ------------------------------------------------------------------------------
 
+@pytest.mark.negative
+@pytest.mark.boundary
+@pytest.mark.p1
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.security

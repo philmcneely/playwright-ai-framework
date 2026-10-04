@@ -43,6 +43,8 @@ from pathlib import Path
 from utils.network_mocking import create_mock_data_file, get_mock_template
 
 
+@pytest.mark.api
+@pytest.mark.regression
 class TestBasicAPIMocking:
     """Test basic CRUD operations with API mocking."""
     
@@ -236,6 +238,8 @@ class TestBasicAPIMocking:
         assert "User deleted successfully" in message
 
 
+@pytest.mark.api
+@pytest.mark.regression
 class TestFileBasedMocking:
     """Test file-based mock data loading."""
     
@@ -315,6 +319,8 @@ class TestFileBasedMocking:
         assert await laptop.locator('.category').text_content() == "Electronics"
 
 
+@pytest.mark.api
+@pytest.mark.regression
 class TestDynamicResponses:
     """Test dynamic response generation."""
     
@@ -423,6 +429,8 @@ class TestDynamicResponses:
         assert "No results found" in no_results
 
 
+@pytest.mark.api
+@pytest.mark.regression
 class TestErrorHandling:
     """Test error scenarios and edge cases."""
     
@@ -504,6 +512,8 @@ class TestErrorHandling:
         assert "User not found" in not_found
 
 
+@pytest.mark.api
+@pytest.mark.regression
 class TestNetworkConditions:
     """Test various network conditions and scenarios."""
     
@@ -639,6 +649,8 @@ class TestNetworkConditions:
         assert "Offline mode detected" in offline_text
 
 
+@pytest.mark.api
+@pytest.mark.regression
 class TestAdvancedScenarios:
     """Test advanced API scenarios like authentication, pagination, etc."""
     
@@ -821,6 +833,8 @@ class TestAdvancedScenarios:
         assert await users_page2[0].text_content() == "User 4"
 
 
+@pytest.mark.api
+@pytest.mark.regression
 @pytest.mark.asyncio
 async def test_comprehensive_api_workflow(page, api_mocker):
     """

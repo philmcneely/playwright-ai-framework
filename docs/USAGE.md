@@ -121,3 +121,61 @@ semantic locators, data-agnostic assertions, and page objects for anything reuse
 ## Which path?
 - **Authoring new tests / interactive triage** → Path 1 (Claude Code + agents).
 - **CI, nightly, unattended, swap models freely** → Path 2 (the `heal` CLI).
+
+---
+
+## Tags, reports and retries (standard conventions)
+
+### Tags (markers) and filtering
+Tag a test with any number of `@pytest.mark.<name>` and select with `-m`.
+
+| Kind | Markers |
+|---|---|
+| Suite | `smoke`, `regression` |
+| Priority | `p0` (critical) `p1` `p2` `p3` |
+| Type | `positive`, `negative`, `boundary` |
+| Dependency | `llm` (needs an LLM / AI service) |
+| **Feature** | anything you like: `login`, `cart`, `checkout`, ... |
+
+Feature markers need **no registration**: `conftest.py` scans the test paths at
+startup and registers every `pytest.mark.<name>` it finds, so `pytest -m cart`
+works with no "unknown marker" warning. Standard markers are documented in
+`pytest.ini`. (`--strict-markers` is intentionally off for this reason, so
+double-check marker spelling.)
+
+```bash
+pytest -m smoke                     # all smoke tests
+pytest -m login                     # one feature
+pytest -m "smoke and login"         # intersection
+pytest -m "login and negative"      # negative login cases
+pytest -m "p0 or p1"                # priority tiers
+pytest -m "not llm and not visual"  # skip AI/visual tests
+pytest --collect-only -q -m smoke   # preview what a filter selects
+```
+
+### Reports and artifacts (all under `results/`)
+Enabled by default via `addopts` in `pytest.ini`:
+
+| Output | Path |
+|---|---|
+| JUnit XML (CI ingestion) | `results/junit.xml` |
+| Self-contained HTML report | `results/report.html` |
+| Playwright trace (`retain-on-failure`) | `results/artifacts/<test>.trace.zip` - open with `playwright show-trace` |
+| Screenshot (`only-on-failure`) | `results/artifacts/<test>.png` |
+| Console | verbose, short tracebacks |
+
+Allure output (`test_artifacts/allure/`) continues as before. Override any
+option on the command line, e.g. `--tracing=on`, `--screenshot=off`,
+`--junitxml=out.xml`, `--output=some/dir`.
+
+### Retries
+Flaky-test retries use `pytest-rerunfailures`. Default is **0** (no retries):
+
+```bash
+pytest --reruns 2                       # retry failures up to 2 times
+pytest --reruns 2 --reruns-delay 5      # wait 5s between attempts
+pytest -m smoke --reruns 2 -n auto
+```
+Retried tests show as `RERUN` in the console/HTML report, and traces are kept
+for failed attempts. Mark a single known-flaky test with
+`@pytest.mark.flaky(reruns=3)`.

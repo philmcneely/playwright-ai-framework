@@ -61,6 +61,7 @@ Date: [2025-07-29]
 """
 
 import os
+import re
 import json
 import time
 import allure
@@ -69,6 +70,7 @@ import pytest_asyncio
 from config.settings import settings
 from playwright.async_api import Locator, TimeoutError as PlaywrightTimeoutError
 import threading
+from pathlib import Path
 from collections import defaultdict
 import asyncio
 from utils.ai_healing import get_ollama_service, find_page_object, ensure_ollama_ready
@@ -237,12 +239,64 @@ async def patched_fill(self, *args, timeout=None, **kwargs):
 Locator.fill = patched_fill
 
 # ------------------------------------------------------------------------------
+# Standard artifacts: pytest-playwright style --tracing / --screenshot options
+# (registered by pytest-playwright, set in pytest.ini) honored by our own page
+# fixture. Output goes under --output (default results/artifacts).
+# ------------------------------------------------------------------------------
+
+
+def _option(request, name, default="off"):
+    try:
+        return request.config.getoption(name) or default
+    except ValueError:
+        return default
+
+
+def _tracing_mode(request):
+    return _option(request, "--tracing")
+
+
+def _test_failed(request):
+    rep = getattr(request.node, "rep_call", None)
+    return bool(rep and rep.failed)
+
+
+def _artifact_path(request, suffix):
+    out = Path(_option(request, "--output", "results/artifacts"))
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", request.node.nodeid)
+    out.mkdir(parents=True, exist_ok=True)
+    return out / f"{safe}{suffix}"
+
+
+async def _save_screenshot(request, page, failed):
+    mode = _option(request, "--screenshot")
+    if mode == "on" or (mode == "only-on-failure" and failed):
+        try:
+            await page.screenshot(path=str(_artifact_path(request, ".png")), full_page=True)
+        except Exception as e:
+            print(f"Could not save screenshot: {e}")
+
+
+async def _save_trace(request, context, mode, failed):
+    if mode == "off":
+        return
+    keep = mode == "on" or (mode == "retain-on-failure" and failed)
+    try:
+        if keep:
+            await context.tracing.stop(path=str(_artifact_path(request, ".trace.zip")))
+        else:
+            await context.tracing.stop()
+    except Exception as e:
+        print(f"Could not save trace: {e}")
+
+
+# ------------------------------------------------------------------------------
 # Fixture: page
 # ------------------------------------------------------------------------------
 
 
 @pytest_asyncio.fixture
-async def page():
+async def page(request):
     """
     Async pytest fixture that launches a Playwright browser page based on environment
     variables or settings configuration. Supports Chromium, Firefox, and WebKit.
@@ -297,6 +351,9 @@ async def page():
             else:
                 raise ValueError(f"Unsupported BROWSER value: {browser_name}")
             context = await browser.new_context()
+            tracing_mode = _tracing_mode(request)
+            if tracing_mode != "off":
+                await context.tracing.start(screenshots=True, snapshots=True, sources=True)
             page = await context.new_page()
             print(f"\n Using {browser_name} browser (headless={headless})")
             api_capture = APICapture()
@@ -304,6 +361,9 @@ async def page():
             page.on("response", api_capture.on_response)
             page._api_capture = api_capture
             yield page
+            failed = _test_failed(request)
+            await _save_screenshot(request, page, failed)
+            await _save_trace(request, context, tracing_mode, failed)
             await browser.close()
 
 
@@ -322,6 +382,10 @@ def pytest_runtest_makereport(item, call):
     """
     outcome = yield
     rep = outcome.get_result()
+
+    # Record the phase result for fixtures (trace/screenshot-on-failure) even
+    # when AI healing is disabled.
+    setattr(item, "rep_" + rep.when, rep)
 
     # Skip all AI healing logic if disabled
     if not ollama_service.enabled:
@@ -496,9 +560,44 @@ _observability_retry_counts: dict[str, int] = defaultdict(int)
 _pytest_config = None
 
 
+# Marks pytest itself (or common plugins) provides - never auto-registered.
+_BUILTIN_MARKS = {
+    "parametrize", "skip", "skipif", "xfail", "usefixtures", "filterwarnings",
+    "asyncio", "flaky", "timeout", "tryfirst", "trylast",
+}
+_MARK_USE = re.compile(r"pytest\.mark\.([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _register_used_markers(config):
+    """
+    Register every ``@pytest.mark.<name>`` found in the test paths so arbitrary
+    FEATURE markers (login, cart, ...) work with ``pytest -m <name>`` and
+    ``-m "smoke and cart"`` without PytestUnknownMarkWarning. Standard markers
+    stay documented in pytest.ini; this only adds the ones that are missing.
+    """
+    known = {
+        line.split(":", 1)[0].split("(", 1)[0].strip()
+        for line in config.getini("markers")
+    }
+    roots = [Path(str(a).split("::")[0]) for a in config.args if a]
+    roots += [config.rootpath / p for p in config.getini("testpaths")]
+    for root in roots:
+        root = root if root.is_absolute() else config.rootpath / root
+        files = [root] if root.is_file() else root.rglob("*.py") if root.is_dir() else []
+        for f in files:
+            try:
+                names = _MARK_USE.findall(f.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError):
+                continue
+            for name in set(names) - known - _BUILTIN_MARKS:
+                config.addinivalue_line("markers", f"{name}: feature marker (auto-registered)")
+                known.add(name)
+
+
 def pytest_configure(config):
     global _pytest_config
     _pytest_config = config
+    _register_used_markers(config)
 
 
 def _get_test_tags(report):

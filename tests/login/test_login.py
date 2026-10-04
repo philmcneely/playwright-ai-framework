@@ -56,6 +56,7 @@ async def test_login_direct_fail(page):
 # Test: Direct Login with Valid Credentials - fails on purpose (AI Healing)
 # ------------------------------------------------------------------------------
 
+@pytest.mark.llm
 @pytest.mark.trigger_ai_healing
 @screenshot_on_failure
 @pytest.mark.compatibility
@@ -82,6 +83,8 @@ async def test_login_direct_valid_credentials_ai_healing(page):
 # Test: Successful Login Flow
 # ------------------------------------------------------------------------------
 
+@pytest.mark.positive
+@pytest.mark.p0
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.smoke
@@ -110,6 +113,8 @@ async def test_login_direct_valid_credentials(page):
 # Test: Invalid Username Scenario
 # ------------------------------------------------------------------------------
 
+@pytest.mark.negative
+@pytest.mark.p1
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.smoke
@@ -142,6 +147,8 @@ async def test_login_invalid_username(page):
 # Test: Invalid Password Scenario
 # ------------------------------------------------------------------------------
 
+@pytest.mark.negative
+@pytest.mark.p1
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.smoke
@@ -174,6 +181,9 @@ async def test_login_invalid_password(page):
 # Test: Empty Credentials Scenario
 # ------------------------------------------------------------------------------
 
+@pytest.mark.negative
+@pytest.mark.boundary
+@pytest.mark.p2
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.asyncio
@@ -198,6 +208,8 @@ async def test_login_empty_credentials(page):
 # Test: Logout Functionality
 # ------------------------------------------------------------------------------
 
+@pytest.mark.positive
+@pytest.mark.p1
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.smoke
@@ -232,6 +244,8 @@ async def test_logout_functionality(page):
 # Test: Form Field Validation
 # ------------------------------------------------------------------------------
 
+@pytest.mark.boundary
+@pytest.mark.p2
 @screenshot_on_failure
 @pytest.mark.login
 @pytest.mark.asyncio
