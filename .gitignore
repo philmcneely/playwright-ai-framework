@@ -49,3 +49,6 @@ ai_healing_reports/
 data/stability_history.json
 data/stability_history.lock
 data/stability_history.json.tmp
+
+# Standard reporter output (JUnit XML, HTML report, traces, screenshots)
+results/

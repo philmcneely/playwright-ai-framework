@@ -38,6 +38,9 @@ import os
 from playwright.async_api import Page
 
 
+@pytest.mark.visual
+@pytest.mark.regression
+@pytest.mark.p2
 @pytest.mark.asyncio
 async def test_homepage_visual_baseline(page: Page, visual_regression):
     """
@@ -103,6 +106,9 @@ async def test_homepage_visual_baseline(page: Page, visual_regression):
     await visual_regression("homepage_baseline", tolerance=0.01)
 
 
+@pytest.mark.visual
+@pytest.mark.regression
+@pytest.mark.p2
 @pytest.mark.asyncio
 async def test_homepage_visual_small_change(page: Page, visual_regression):
     """
@@ -167,6 +173,9 @@ async def test_homepage_visual_small_change(page: Page, visual_regression):
     await visual_regression("small_change_test", tolerance=0.02)
 
 
+@pytest.mark.visual
+@pytest.mark.regression
+@pytest.mark.p2
 @pytest.mark.asyncio
 async def test_homepage_visual_major_change_should_fail(page: Page, visual_regression):
     """
@@ -277,6 +286,9 @@ async def test_homepage_visual_major_change_should_fail(page: Page, visual_regre
         await visual_regression("major_change_test", tolerance=0.01)  # Lower tolerance to ensure failure
 
 
+@pytest.mark.visual
+@pytest.mark.regression
+@pytest.mark.p2
 @pytest.mark.asyncio
 async def test_element_specific_visual_regression(page: Page, visual_regression):
     """
@@ -322,6 +334,9 @@ async def test_element_specific_visual_regression(page: Page, visual_regression)
     await visual_regression("header_element", selector="#test-header", tolerance=0.01)
 
 
+@pytest.mark.visual
+@pytest.mark.regression
+@pytest.mark.p2
 @pytest.mark.asyncio 
 async def test_cleanup_visual_files():
     """

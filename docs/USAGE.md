@@ -121,3 +121,104 @@ semantic locators, data-agnostic assertions, and page objects for anything reuse
 ## Which path?
 - **Authoring new tests / interactive triage** → Path 1 (Claude Code + agents).
 - **CI, nightly, unattended, swap models freely** → Path 2 (the `heal` CLI).
+
+---
+
+## Tags, reports and retries (standard conventions)
+
+### Tags (markers) and filtering
+Tag a test with any number of `@pytest.mark.<name>` and select with `-m`.
+
+| Kind | Markers |
+|---|---|
+| Suite | `smoke`, `regression` |
+| Priority | `p0` (critical) `p1` `p2` `p3` |
+| Type | `positive`, `negative`, `boundary` |
+| Dependency | `llm` (needs an LLM / AI service) |
+| **Feature** | anything you like: `login`, `cart`, `checkout`, ... |
+
+Feature markers need **no registration**: `conftest.py` scans the test paths at
+startup and registers every `pytest.mark.<name>` it finds, so `pytest -m cart`
+works with no "unknown marker" warning. Standard markers are documented in
+`pytest.ini`. (`--strict-markers` is intentionally off for this reason, so
+double-check marker spelling.)
+
+```bash
+pytest -m smoke                     # all smoke tests
+pytest -m login                     # one feature
+pytest -m "smoke and login"         # intersection
+pytest -m "login and negative"      # negative login cases
+pytest -m "p0 or p1"                # priority tiers
+pytest -m "not llm and not visual"  # skip AI/visual tests
+pytest --collect-only -q -m smoke   # preview what a filter selects
+```
+
+### Reports and artifacts (all under `results/`)
+Enabled by default via `addopts` in `pytest.ini`:
+
+| Output | Path |
+|---|---|
+| JUnit XML (CI ingestion) | `results/junit.xml` |
+| Self-contained HTML report | `results/report.html` |
+| Playwright trace (`retain-on-failure`) | `results/artifacts/<test>.trace.zip` - open with `playwright show-trace` |
+| Screenshot (`only-on-failure`) | `results/artifacts/<test>.png` |
+| Allure results (optional) | `results/allure/` |
+| Console | verbose, short tracebacks |
+
+**Allure** (`allure-pytest`) writes raw results to `results/allure/` on every
+run; the Allure CLI is only needed to *render* them, so CI does not require it:
+
+```bash
+allure serve results/allure                          # open interactively
+allure generate results/allure -o results/allure-report --clean --single-file
+```
+Install the CLI separately (`brew install allure`, or the release tarball).
+Override any
+option on the command line, e.g. `--tracing=on`, `--screenshot=off`,
+`--junitxml=out.xml`, `--output=some/dir`.
+
+### Retries
+Flaky-test retries use `pytest-rerunfailures`. Default is **0** (no retries):
+
+```bash
+pytest --reruns 2                       # retry failures up to 2 times
+pytest --reruns 2 --reruns-delay 5      # wait 5s between attempts
+pytest -m smoke --reruns 2 -n auto
+```
+Retried tests show as `RERUN` in the console/HTML report, and traces are kept
+for failed attempts. Mark a single known-flaky test with
+`@pytest.mark.flaky(reruns=3)`.
+
+---
+
+## Data setup & teardown
+
+Reusable fixtures in `utils/data_seeding.py` (registered in `conftest.py`). All
+configuration comes from the environment; nothing is hardcoded, and each helper
+skips or no-ops when it is not configured.
+
+| Env var | Purpose |
+|---|---|
+| `SEED_API_BASE_URL` | Base URL of the API used to seed data (`api_seed` skips the test if unset) |
+| `SEED_API_TOKEN` | Optional bearer token |
+| `SEED_DB_DSN` | Optional DSN: `sqlite:///path.db`, or `postgresql://...` (needs `psycopg`). Unset = `db_seed` is a no-op |
+
+| Fixture | Scope | What it gives you |
+|---|---|---|
+| `cleanup` | function | Registry: `cleanup.register("desc", fn)`; callbacks run **LIFO** after the test, all of them even if one fails (failures are reported together) |
+| `session_cleanup` | session | Same, for shared data removed once at session end |
+| `api_seed` | function | HTTP client: `create(path, payload)` POSTs and schedules `DELETE <path>/<id>` for teardown; also `delete(path)` and `reset(path)` |
+| `db_seed` | function | `run_script(sql)`, `execute(sql, params)`, `reset("table", ...)`; no-op without a DSN |
+
+### Pattern: yield-based setup -> teardown
+```python
+@pytest.fixture
+def order(api_seed, cleanup):
+    created = api_seed.create("/orders", {"sku": "demo"})   # setup; auto-deleted
+    cleanup.register("flush cache", lambda: flush_cache())  # extra teardown
+    yield created                                           # test runs here
+    # code after yield also runs as teardown, pass or fail
+```
+Prefer registering a cleanup right after each create so a failure halfway
+through setup still removes what exists. Example: `tests/test_data_seeding_example.py`
+(`SEED_API_BASE_URL=... pytest -m seeding`).
