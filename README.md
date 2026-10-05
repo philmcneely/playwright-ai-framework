@@ -345,10 +345,10 @@ flagged for a human (likely an app bug, not drift).
 The model is any **OpenAI-compatible** endpoint:
 
 ```bash
-# local / fleet proxy (no key); route fleet models through their proxy for attribution
+# local or self-hosted endpoint (no key needed)
 BASE_URL=https://app.example.com \
-HEAL_BASE_URL=http://<proxy-host>:3025/v1 \
-HEAL_MODEL='ollama@localhost/qwen3.8-27b:latest' \
+HEAL_BASE_URL=http://localhost:11434/v1 \
+HEAL_MODEL='your-model-name' \
 python scripts/heal.py -k login --open-pr
 
 # OpenRouter

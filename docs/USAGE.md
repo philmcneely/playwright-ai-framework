@@ -11,7 +11,7 @@ interactive loop** (authoring/triage) or a **headless, pick-any-model call**
 
 | | Path 1 — Claude Code + MCP agents | Path 2 — the `heal` CLI |
 |---|---|---|
-| Model | the agent loop host (Claude; or opencode/codex → any model) | any OpenAI-compatible endpoint (OpenRouter / local / fleet Qwen) |
+| Model | the agent loop host (Claude; or opencode/codex → any model) | any OpenAI-compatible endpoint (OpenRouter / local / self-hosted) |
 | Needs | Claude Code (or another loop host) | just Python — no Claude Code |
 | Best for | authoring tests, judgment-heavy healing | CI / nightly / unattended healing |
 
@@ -70,8 +70,8 @@ flagged for a human. `--open-pr` assembles one PR with the decisions.
 
 **Model examples:**
 ```bash
-# Fleet Qwen3.8-27B via its attributed proxy
-HEAL_BASE_URL=http://192.168.1.47:3025/v1 HEAL_MODEL='ollama@localhost/qwen3.8-27b:latest' python scripts/heal.py
+# Local / self-hosted OpenAI-compatible endpoint (e.g. Ollama, vLLM, an LLM proxy)
+HEAL_BASE_URL=http://localhost:11434/v1 HEAL_MODEL='your-model-name' python scripts/heal.py
 
 # OpenRouter
 HEAL_BASE_URL=https://openrouter.ai/api/v1 HEAL_MODEL='...' HEAL_API_KEY=sk-or-... python scripts/heal.py
