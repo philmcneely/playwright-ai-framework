@@ -77,6 +77,14 @@ HEAL_BASE_URL=http://localhost:11434/v1 HEAL_MODEL='your-model-name' python scri
 HEAL_BASE_URL=https://openrouter.ai/api/v1 HEAL_MODEL='...' HEAL_API_KEY=sk-or-... python scripts/heal.py
 ```
 
+**Safety:** the model's reply is only applied if it parses as a chain of approved
+Playwright locator calls with literal arguments on the same receiver as the
+original; only the one diagnosed occurrence is edited (a locator that appears
+more than once is left for a human); an edit is kept only if the exact target test
+ran *and* passed. `--open-pr` requires a clean working tree and commits only the
+healed files. For pages behind login, set `HEAL_STORAGE_STATE=<playwright
+storage-state.json>` so the grounding snapshot is taken as a signed-in user.
+
 **Flags:** `-k <name>` (pytest keyword scope), `--max N`, `--open-pr`,
 `--tickets off|annotate|file` (suspected app-bugs → annotate surfaces a matching
 open ticket; file creates deduped ones; `TICKET_TARGETS=clickup,jira` selects
