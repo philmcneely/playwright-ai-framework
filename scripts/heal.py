@@ -1,62 +1,62 @@
 """
 ===============================================================================
-Out-of-Band Locator Healer (v2, CLI mode)
+Out-of-Band Locator Healer (v3, heal-service client)
 ===============================================================================
-Runs failing pytest + Playwright tests, reproduces each failure in a real
-browser to read the live accessibility snapshot, asks a configurable model for a
-resilient semantic locator, applies it, and re-runs to verify. Heals LOCATORS
-only -- never assertions or test intent. A failure it cannot make pass is
-reverted and reported for a human (likely an app bug, not drift).
+Runs failing pytest + Playwright tests, sends each failure's evidence to a heal service, applies the locator patch the
+service returns, and re-runs to verify. Heals LOCATORS only -- never assertions or test intent. A failure it cannot make
+pass is reverted and reported for a human (likely an app bug, not drift).
 
-This is the on-demand half of the overnight heal->PR orchestration: run it in
-CI/cron after the suite, optionally with --open-pr to raise a single PR with the
-decisions and the tests it left untouched.
+The service owns the model calls and the healing rules: it finds the broken call, picks the element, writes the locator by
+the priority rules (test id > id > name > ... > text), adds language branches and decides healed or needs-human. This script
+contains no model URL, model name, prompt or reply parsing. What it does (see utils/heal_client.py):
+    - runs the suite and collects the failures from pytest's JUnit XML
+    - per failure: reopens the failing route, collects the element inventory with the service's own probe script, sends it
+      with the stack files, the language signals and (when recorded) the last green run's fingerprint
+    - checks each candidate in the live page (exactly one match, the expected element) before editing anything
+    - applies a patch only if its hash, path, span and replacement pass the safety checks, then re-runs the exact test and
+      keeps the edit only if that test ran and passed and the service confirms
+    - prints every decision with its token usage and a run total, writes heal-summary.json, and with --open-pr commits only
+      the healed files
 
-Model is provider-agnostic via an OpenAI-compatible endpoint:
-    HEAL_BASE_URL   e.g. https://openrouter.ai/api/v1 | http://localhost:11434/v1
-    HEAL_MODEL      e.g. your-model-name
-    HEAL_API_KEY    optional (omit for a local endpoint)
+This is the on-demand half of the overnight heal->PR orchestration: run it in CI/cron after the suite, optionally with
+--open-pr to raise a single PR with the decisions and the tests it left untouched.
 
 Usage:
-    BASE_URL=... HEAL_BASE_URL=... HEAL_MODEL=... [HEAL_STORAGE_STATE=auth.json] \\
+    BASE_URL=... HEAL_SERVICE_URL=http://localhost:8765 [HEAL_SERVICE_TOKEN=...] [HEAL_STORAGE_STATE=auth.json] \\
         python scripts/heal.py [-k <name>] [--open-pr] [--max N]
+
+Environment Variables:
+    HEAL_SERVICE_URL: the heal service (required)
+    HEAL_SERVICE_TOKEN: bearer token, when the service needs one
+    HEAL_STORAGE_STATE: Playwright storage-state file, so the page is opened as a signed-in user (never sent)
+    HEAL_VISION / HEAL_MASK: accepted; screenshots are not captured by this client yet (vision is off)
+    HEAL_TEST_ID_ATTRIBUTE: the project's test id attribute (default data-testid)
+    HEAL_ARTIFACTS_DIR: where heal-summary.json goes (default test_artifacts)
+    BASE_URL: the app under test
 
 Author: PMAC
 Site: The Internet (https://the-internet.herokuapp.com)
 ===============================================================================
 """
 import argparse
-import ast
+import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
+import time
+import uuid
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-import requests
-from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # `python scripts/heal.py` puts scripts/ first, not the repo
 
-BASE_URL = os.getenv("BASE_URL", "http://localhost:7080")
-HEAL_BASE_URL = os.getenv("HEAL_BASE_URL")
-HEAL_MODEL = os.getenv("HEAL_MODEL")
-HEAL_API_KEY = os.getenv("HEAL_API_KEY", "")
-# Optional Playwright storage-state file (JSON) so the snapshot of an
-# authenticated page is taken as a logged-in user, not an anonymous visitor.
-HEAL_STORAGE_STATE = os.getenv("HEAL_STORAGE_STATE")
-SOURCE_DIRS = ("pages", "tests", "utils")
-
-# A replacement may only be a chain of these Playwright locator calls on the
-# same receiver as the expression it replaces, with literal arguments.
-ALLOWED_LOCATOR_METHODS = {
-    "locator", "get_by_role", "get_by_label", "get_by_text", "get_by_placeholder",
-    "get_by_test_id", "get_by_alt_text", "get_by_title", "first", "last", "nth", "filter",
-}
-
-SELECTOR_RE = re.compile(
-    r"""locator\(['"]([^'"]+)['"]\)|get_by_\w+\(['"]([^'"]+)['"]\)|waiting for (?:locator )?['"]([^'"]+)['"]"""
+from utils.heal_client import (  # noqa: E402
+    HealSettings, Healer, ServiceClient, run_total, validate_replacement,
 )
+
+__all__ = ["run_pytest", "run_suite", "verify_passed", "validate_replacement", "working_tree_dirty", "heal_failures",
+           "write_summary", "main"]
 
 
 def run_pytest(keyword=None):
@@ -64,12 +64,13 @@ def run_pytest(keyword=None):
     Run pytest (optionally -k filtered). Returns (returncode, cases) where each
     case is {name, classname, outcome, error}; outcome is passed|failed|skipped.
     cases is empty when nothing ran or the JUnit report could not be produced.
+    HEAL_RUN is set for the child so the fingerprint plugin records nothing during a heal.
     """
     out = os.path.join(tempfile.mkdtemp(prefix="heal-"), "report.xml")
     cmd = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "--reruns", "0", f"--junit-xml={out}"]
     if keyword:
         cmd += ["-k", keyword]
-    proc = subprocess.run(cmd, env={**os.environ}, capture_output=True)
+    proc = subprocess.run(cmd, env={**os.environ, "HEAL_RUN": "1"}, capture_output=True)
     cases = []
     try:
         root = ET.parse(out).getroot()
@@ -104,239 +105,125 @@ def verify_passed(test, runner=run_pytest):
     return returncode == 0 and bool(ran) and all(c["outcome"] == "passed" for c in ran)
 
 
-def broken_selector_from(error):
-    """Pull the first concrete selector literal out of a Playwright error message."""
-    m = SELECTOR_RE.search(error)
-    if not m:
-        return None
-    return next((g for g in m.groups() if g), None)
-
-
-def locate_in_source(selector, root=None):
-    """
-    Find the single source site of a ``page.locator('<selector>')`` call.
-
-    Scans *.py under SOURCE_DIRS in-process (literal match, no grep/regex on the
-    selector, cross-platform). Returns {file, src, start, end, call, route}, or
-    {"ambiguous": N} when the same locator appears more than once (replacing it
-    blindly could change an unrelated use), or None when not found.
-    """
-    root = Path(root) if root else Path.cwd()
-    call_re = re.compile(
-        r"(?:self\.)?page\.locator\(\s*(['\"])" + re.escape(selector) + r"\1\s*\)"
-    )
-    sites = []
-    for d in SOURCE_DIRS:
-        for path in sorted((root / d).rglob("*.py")):
-            src = path.read_text(encoding="utf-8")
-            for m in call_re.finditer(src):
-                sites.append((path, src, m))
-    if not sites:
-        return None
-    if len(sites) > 1:
-        return {"ambiguous": len(sites)}
-    path, src, m = sites[0]
-    route_m = re.search(r'self\.url\s*=\s*f?"[^"]*BASE_URL\}?([^"]*)"', src)
-    return {
-        "file": str(path.relative_to(root)),
-        "src": src,
-        "start": m.start(),
-        "end": m.end(),
-        "call": m.group(0),
-        "route": route_m.group(1) if route_m else "/",
-    }
-
-
-def validate_replacement(proposed, original):
-    """
-    Return the replacement if it is a safe drop-in for ``original``, else None.
-    Must be a single-line expression that is a chain of approved Playwright
-    locator calls with literal arguments, rooted at the same receiver
-    (``page`` / ``self.page``) as the original.
-    """
-    if not proposed or "\n" in proposed or ";" in proposed:
-        return None
-    try:
-        tree = ast.parse(proposed, mode="eval").body
-        original_tree = ast.parse(original, mode="eval").body
-    except SyntaxError:
-        return None
-
-    def receiver(node):
-        while isinstance(node, (ast.Call, ast.Attribute)):
-            node = node.func if isinstance(node, ast.Call) else node.value
-        return node
-
-    def base_receiver(node):
-        # the object the first locator method is called on, e.g. self.page
-        chain = []
-        while isinstance(node, (ast.Call, ast.Attribute)):
-            chain.append(node)
-            node = node.func if isinstance(node, ast.Call) else node.value
-        for n in reversed(chain):
-            if isinstance(n, ast.Attribute) and n.attr in ALLOWED_LOCATOR_METHODS:
-                return ast.unparse(n.value)
-        return None
-
-    if not isinstance(tree, (ast.Call, ast.Attribute)) or not isinstance(receiver(tree), ast.Name):
-        return None
-    if base_receiver(tree) != base_receiver(original_tree):
-        return None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute):
-            # attribute access is allowed only for approved methods and the receiver chain
-            if node.attr not in ALLOWED_LOCATOR_METHODS and ast.unparse(node) not in {"self.page"}:
-                return None
-        elif isinstance(node, ast.Call):
-            for arg in [*node.args, *(k.value for k in node.keywords)]:
-                if not isinstance(arg, ast.Constant):
-                    return None
-        elif not isinstance(node, (ast.Name, ast.Constant, ast.Load, ast.keyword)):
-            return None
-    return proposed
-
-
-def aria_snapshot(route):
-    """Capture the live accessibility snapshot of a route for grounding."""
-    with sync_playwright() as p:
-        browser = p.chromium.launch()
-        try:
-            context = browser.new_context(
-                base_url=BASE_URL,
-                **({"storage_state": HEAL_STORAGE_STATE} if HEAL_STORAGE_STATE else {}),
-            )
-            page = context.new_page()
-            page.goto(route)
-            return page.locator("body").aria_snapshot()
-        finally:
-            browser.close()
-
-
-def propose_replacement(call, snapshot):
-    """Ask the model to replace an exact locator expression (semantic, intent-preserving)."""
-    prompt = (
-        "You are a Playwright (Python) test healer. A locator broke after a UI change.\n"
-        f"Replace exactly this locator expression:\n  {call}\n\n"
-        f"Live page accessibility snapshot:\n{snapshot}\n\n"
-        "Return ONLY the drop-in replacement expression (same leading receiver, e.g. "
-        "\"self.page.get_by_label('Username')\"). No prose, no code fence, no trailing "
-        "characters. Prefer a resilient semantic locator (get_by_role/get_by_label/"
-        "get_by_test_id over raw CSS/id). Target the SAME element -- never change the test's intent."
-    )
-    headers = {"Content-Type": "application/json"}
-    if HEAL_API_KEY:
-        headers["Authorization"] = f"Bearer {HEAL_API_KEY}"
-    resp = requests.post(
-        f"{HEAL_BASE_URL}/chat/completions",
-        headers=headers,
-        json={"model": HEAL_MODEL, "messages": [{"role": "user", "content": prompt}],
-              "temperature": 0, "max_tokens": 200},
-        timeout=180,
-    )
-    out = resp.json()["choices"][0]["message"]["content"].strip()
-    out = re.sub(r"```[a-z]*\n?|```", "", out).strip().splitlines()[0].strip()
-    return out
-
-
-def apply_replacement(loc, proposed):
-    """Source text with ONLY the located occurrence replaced."""
-    return loc["src"][: loc["start"]] + proposed + loc["src"][loc["end"]:]
-
-
 def working_tree_dirty():
     """True if any tracked file has uncommitted changes."""
     out = subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=no"], text=True)
     return bool(out.strip())
 
 
+def heal_failures(fails, healer, max_n, verify=verify_passed):
+    """
+    One decision per failing test. Failures past `max_n` are recorded as needs_human, never dropped. A failure a
+    previous heal already fixed (a page object shared by several tests) is confirmed by re-running it, not healed twice.
+    """
+    decisions, healed = [], []
+    for f in fails[:max_n]:
+        if healed and verify(f):
+            first = healed[0]
+            decisions.append({"test": f["name"], "outcome": "healed", "file": first["file"], "from": first["from"],
+                              "to": first["to"], "files": first.get("files", []), "usage": {},
+                              "source": f"same fix as {first['test']} (shared locator), re-run passed"})
+            continue
+        d = healer.heal(f)
+        decisions.append(d)
+        if d["outcome"] == "healed":
+            healed.append(d)
+    decisions += [{"test": f["name"], "outcome": "needs_human", "reason": "beyond_max",
+                   "why": f"not attempted: beyond --max {max_n}"} for f in fails[max_n:]]
+    return decisions
+
+
+def write_summary(decisions, started, run_id, directory=None):
+    """Write heal-summary.json (counts, usage total, every decision) into the test artifacts dir; returns its path."""
+    directory = Path(directory or os.getenv("HEAL_ARTIFACTS_DIR", "test_artifacts"))
+    directory.mkdir(parents=True, exist_ok=True)
+    counts = {k: sum(1 for d in decisions if d["outcome"] == k) for k in ("healed", "needs_human", "not_drift")}
+    summary = {"run_id": run_id, "started": started, "finished": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+               "failures": len(decisions), "counts": counts, "usage": run_total(decisions), "decisions": decisions}
+    path = directory / "heal-summary.json"
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+    return path
+
+
+def _tokens(d):
+    u = d.get("usage") or {}
+    return f"tokens {u.get('input_tokens', 0)} in / {u.get('output_tokens', 0)} out, {u.get('calls', 0)} call(s)"
+
+
+def print_decisions(decisions):
+    print("\n[heal] decisions:")
+    for d in decisions:
+        if d["outcome"] == "healed":
+            print(f"  [healed] {d['test']}: {d['file']}: {d['from']} -> {d['to']}  ({_tokens(d)})")
+        else:
+            reason = f" [{d['reason']}]" if d.get("reason") else ""
+            print(f"  [{d['outcome']}]{reason} {d['test']}: {d.get('why')}  ({_tokens(d)})")
+    t = run_total(decisions)
+    print(f"[heal] run total: {t['calls']} model call(s), {t['input_tokens']} input / {t['output_tokens']} output tokens, "
+          f"{t['images']} image(s)")
+
+
+def open_pr(healed, other):
+    """Branch, commit ONLY the healed files, push, and open one PR listing the decisions."""
+    branch = f"heal/{time.strftime('%Y-%m-%d')}-{int(time.time()):x}"
+    subprocess.check_call(["git", "checkout", "-b", branch])
+    body_lines = [f"- {d['test']}: {d['from']} -> {d['to']}" for d in healed]
+    healed_files = sorted({f for d in healed for f in (d.get("files") or [d["file"]])})
+    # Stage and commit ONLY the files this run healed.
+    subprocess.check_call(["git", "add", "--", *healed_files])
+    subprocess.check_call(["git", "commit", "-qm",
+                           f"fix(heal): update {len(healed)} drifted locator(s)\n\n" + "\n".join(body_lines),
+                           "--", *healed_files])
+    subprocess.check_call(["git", "push", "-q", "-u", "origin", branch])
+    pr_body = "Automated locator healing (out-of-band).\n\n## Healed (locators only, intent preserved)\n"
+    pr_body += "\n".join(f"- **{d['test']}** -- `{d['from']}` -> `{d['to']}` ({d.get('why') or d.get('source')})" for d in healed)
+    if other:
+        pr_body += "\n\n## Needs human review (not touched)\n" + "\n".join(
+            f"- **{d['test']}** -- {d.get('why')}" for d in other)
+    subprocess.check_call(["gh", "pr", "create", "--base", "main", "--head", branch,
+                           "--title", f"Locator healing -- {len(healed)} fixed, {len(other)} for review",
+                           "--body", pr_body])
+
+
 def main():
-    if not HEAL_BASE_URL or not HEAL_MODEL:
-        print("Set HEAL_BASE_URL and HEAL_MODEL (OpenAI-compatible endpoint + model id).")
+    settings = HealSettings.from_env()
+    if not settings.url:
+        print("Set HEAL_SERVICE_URL (the heal service, for example http://localhost:8765).")
         sys.exit(2)
     ap = argparse.ArgumentParser()
     ap.add_argument("-k", "--grep", default=None, help="pytest -k keyword to scope tests")
     ap.add_argument("--open-pr", action="store_true")
     ap.add_argument("--max", type=int, default=10)
     args = ap.parse_args()
+    if settings.vision != "off":
+        print(f"[heal] HEAL_VISION={settings.vision}: this client sends no screenshot yet, running with vision off.")
 
     if args.open_pr and working_tree_dirty():
         print("[heal] --open-pr needs a clean working tree (tracked files have local changes); "
               "commit or stash them first.")
         sys.exit(2)
 
+    started = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    run_id = uuid.uuid4().hex[:12]
     print(f"[heal] running suite{f' (-k {args.grep})' if args.grep else ''}...")
     fails = run_suite(args.grep)
     if not fails:
         print("[heal] no failures -- nothing to heal.")
         return
     print(f"[heal] {len(fails)} failing test(s).")
-    decisions = []
 
-    for f in fails[args.max:]:
-        decisions.append({"test": f["name"], "outcome": "human",
-                          "why": f"not attempted: beyond --max {args.max}"})
+    healer = Healer(ServiceClient(settings.url, settings.token), settings, verify_passed, run_id=run_id)
+    decisions = heal_failures(fails, healer, args.max)
 
-    for f in fails[: args.max]:
-        selector = broken_selector_from(f["error"])
-        if not selector:
-            decisions.append({"test": f["name"], "outcome": "human",
-                              "why": "no broken selector in the error -- looks like a logic/app failure, not locator drift"})
-            continue
-        loc = locate_in_source(selector)
-        if loc and loc.get("ambiguous"):
-            decisions.append({"test": f["name"], "outcome": "human",
-                              "why": f"selector {selector} appears {loc['ambiguous']} times in source -- "
-                                     "ambiguous which use broke, not auto-edited"})
-            continue
-        if not loc:
-            decisions.append({"test": f["name"], "outcome": "human",
-                              "why": f"selector {selector} not found as a .locator() call in source (dynamic/semantic?)"})
-            continue
-        snapshot = aria_snapshot(loc["route"])
-        proposed = validate_replacement(propose_replacement(loc["call"], snapshot), loc["call"])
-        if not proposed or proposed == loc["call"]:
-            decisions.append({"test": f["name"], "outcome": "human",
-                              "why": "model produced no usable (valid, safe) replacement"})
-            continue
-        # Replace only the diagnosed occurrence (by span), not every identical string.
-        patched = apply_replacement(loc, proposed)
-        Path(loc["file"]).write_text(patched, encoding="utf-8")
-        if not verify_passed(f):
-            Path(loc["file"]).write_text(loc["src"], encoding="utf-8")  # revert -- never leave a non-passing change
-            decisions.append({"test": f["name"], "outcome": "human",
-                              "why": f'proposed "{proposed}" did not make the test run and pass -- reverted; likely an app bug'})
-        else:
-            decisions.append({"test": f["name"], "outcome": "healed", "file": loc["file"],
-                              "from": loc["call"], "to": proposed, "source": f'aria snapshot of {loc["route"]}'})
-
-    print("\n[heal] decisions:")
-    for d in decisions:
-        print("  " + str(d))
+    print_decisions(decisions)
+    path = write_summary(decisions, started, run_id)
     healed = [d for d in decisions if d["outcome"] == "healed"]
-    human = [d for d in decisions if d["outcome"] == "human"]
-
+    other = [d for d in decisions if d["outcome"] != "healed"]
     if args.open_pr and healed:
-        import time
-        branch = f"heal/{time.strftime('%Y-%m-%d')}-{int(time.time()):x}"
-        subprocess.check_call(["git", "checkout", "-b", branch])
-        body_lines = [f"- {d['test']}: {d['from']} -> {d['to']}" for d in healed]
-        healed_files = sorted({d["file"] for d in healed})
-        # Stage and commit ONLY the files this run healed.
-        subprocess.check_call(["git", "add", "--", *healed_files])
-        subprocess.check_call(["git", "commit", "-qm",
-                               f"fix(heal): update {len(healed)} drifted locator(s)\n\n" + "\n".join(body_lines),
-                               "--", *healed_files])
-        subprocess.check_call(["git", "push", "-q", "-u", "origin", branch])
-        pr_body = "Automated locator healing (out-of-band).\n\n## Healed (locators only, intent preserved)\n"
-        pr_body += "\n".join(f"- **{d['test']}** -- `{d['from']}` -> `{d['to']}` (grounded in {d['source']})" for d in healed)
-        if human:
-            pr_body += "\n\n## Needs human review (not touched)\n" + "\n".join(
-                f"- **{d['test']}** -- {d['why']}" for d in human)
-        subprocess.check_call(["gh", "pr", "create", "--base", "main", "--head", branch,
-                               "--title", f"Locator healing -- {len(healed)} fixed, {len(human)} for review",
-                               "--body", pr_body])
-
-    print(f"\n[heal] done: {len(healed)} healed, {len(human)} for human review.")
+        open_pr(healed, other)
+    print(f"\n[heal] done: {len(healed)} healed, {len(other)} for human review. Summary: {path}")
 
 
 if __name__ == "__main__":
