@@ -99,6 +99,9 @@ from utils.api_capture import APICapture
 from utils.zap_integration import ZAPIntegration
 from utils.stability_index import record_result, get_unstable_tests
 
+# Records what each locator hit on a clean green run, for the heal service (off unless HEAL_FINGERPRINTS=on)
+pytest_plugins = ["utils.heal_fingerprints"]
+
 # Pytest fixtures (prevents auto-removal)
 pytest_fixtures = [
     visual_regression, api_mocker, cleanup, session_cleanup, api_seed, db_seed
