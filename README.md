@@ -2,6 +2,8 @@
 # 🎭 Playwright AI Test Framework - The Internet Test Site
 
 > 📖 **Using the AI agents & heal CLI, and the test-author workflow (with or without an agent):** see **[docs/USAGE.md](docs/USAGE.md)**.
+>
+> 🩹 **Planned: a standalone heal service** that this framework and the TypeScript one will both call: see **[docs/HEAL_SERVICE_SPEC.md](docs/HEAL_SERVICE_SPEC.md)**.
 
 This guide explains how to set up and run Playwright-based Python tests with Allure reporting on **macOS**, **Windows**, and **Linux**.
 
