@@ -11,8 +11,8 @@ interactive loop** (authoring/triage) or a **headless, pick-any-model call**
 
 | | Path 1 — Claude Code + MCP agents | Path 2 — the `heal` CLI |
 |---|---|---|
-| Model | the agent loop host (Claude; or opencode/codex → any model) | any OpenAI-compatible endpoint (OpenRouter / local / self-hosted) |
-| Needs | Claude Code (or another loop host) | just Python — no Claude Code |
+| Model | the agent loop host (Claude; or opencode/codex → any model) | none in this repo: the heal service owns the model settings |
+| Needs | Claude Code (or another loop host) | Python + a running heal service — no Claude Code |
 | Best for | authoring tests, judgment-heavy healing | CI / nightly / unattended healing |
 
 > Playwright's official Test Agents are JS/TS-only. The agents here are a **port**
@@ -49,46 +49,106 @@ any OpenAI-compatible endpoint (OpenRouter, a local server, our Qwen).
 
 ---
 
-## Path 2 — the `heal` CLI (headless, any model)
+## Path 2 — the `heal` CLI (headless, backed by the heal service)
 
 `scripts/heal.py` is the out-of-band healer — the engine the overnight job uses,
-and usable on demand. **No Claude Code required**; direct call to whatever model
-you point it at. (Uses pytest's JUnit XML + sync Playwright under the hood.)
+and usable on demand. **No Claude Code required, and no model code in this
+repo.** The CLI is a client of the **heal service** (`heal-service`, a separate
+project): the service owns the model calls and the healing rules (which element,
+which locator, language branches, healed or needs-human). The CLI runs the tests,
+gathers evidence, applies the patch the service returns, and re-runs to verify.
 
 ```bash
 BASE_URL=<app-url> \
-HEAL_BASE_URL=<openai-compatible endpoint> \
-HEAL_MODEL=<model id> \
-[HEAL_API_KEY=<key>] \
-python scripts/heal.py [-k <name>] [--max N] [--open-pr] [--tickets off|annotate|file]
+HEAL_SERVICE_URL=http://localhost:8765 \
+[HEAL_SERVICE_TOKEN=<token>] \
+python scripts/heal.py [-k <name>] [--max N] [--open-pr]
 ```
 
-Per failing test: run it → reproduce in a real browser → read the **live
-accessibility snapshot** → ask `HEAL_MODEL` for a resilient semantic locator →
-apply → **re-run to verify**. Locators only; an unhealable failure is reverted and
-flagged for a human. `--open-pr` assembles one PR with the decisions.
+Per failing test: run it → send the stack files, the element inventory of the
+reopened failing route (collected with the service's own probe script), the page
+language and, when recorded, the last green run's fingerprint → the service
+answers with a candidate → the CLI checks it **in the live page (exactly one
+match, the expected element) before editing anything** → applies the patch →
+**re-runs the exact test** → reports back. A candidate that fails moves the
+service to its next one; after the last, the test is flagged for a human. Locators
+only; a failure it cannot make pass is reverted. `--open-pr` assembles one PR
+with the decisions.
 
-**Model examples:**
+**What it prints and writes:** every decision with its token usage
+(`healed`, `needs_human` with the service's reason, `not_drift`), a run total of
+model calls and tokens, and `test_artifacts/heal-summary.json` (counts, usage and
+every decision; `HEAL_ARTIFACTS_DIR` moves it). A failure past `--max`, a service
+that cannot be reached, or an error reply is recorded as `needs_human` with the
+reason; the run never stops on one failure.
+
+**Safety:** the CLI applies a patch only when the file is one it sent and sits
+under the source roots (`pages`, `tests`, `utils`; `HEAL_SOURCE_ROOTS` changes
+them), the file's hash is unchanged since the service saw it, the span holds
+exactly the text the service expected, and the replacement passes the local
+validator (a chain of approved Playwright locator calls with literal arguments on
+the same receiver; each branch of a language switch is checked on its own). Only
+the diagnosed occurrence is edited, and an edit is kept only if the exact target
+test ran *and* passed *and* the service confirms the heal. The service never sees
+input values, cookies or storage state, and this client sends **no screenshot**
+(vision is off: `HEAL_VISION` and `HEAL_MASK` are accepted and unused for now).
+`--open-pr` requires a clean working tree and commits only the healed files. For
+pages behind login, set `HEAL_STORAGE_STATE=<playwright storage-state.json>` so
+the page is opened as a signed-in user (the file stays on this machine).
+
+**Settings:**
+
+| Variable | Meaning |
+|---|---|
+| `HEAL_SERVICE_URL` | the heal service, for example `http://localhost:8765` (required) |
+| `HEAL_SERVICE_TOKEN` | bearer token, when the service requires one |
+| `HEAL_TEST_ID_ATTRIBUTE` | your project's test id attribute (default `data-testid`); `get_by_test_id` is only written when it matches |
+| `HEAL_SOURCE_ROOTS` | comma separated source roots (default `pages,tests,utils`) |
+| `HEAL_STORAGE_STATE` | storage-state file for pages behind login |
+| `HEAL_ARTIFACTS_DIR` | where `heal-summary.json` goes (default `test_artifacts`) |
+| `HEAL_VISION`, `HEAL_MASK` | accepted; unused until vision lands |
+
+**Language branches.** When a locator depends on page copy and the page is now in
+another language than the last green run, the service returns code that switches
+on the page language:
+
+```python
+by_language(self.page, {"en": self.page.get_by_label('Username'), "fr": self.page.get_by_label("Nom d'utilisateur")})
+```
+
+`by_language` ships in `utils/heal_locale.py`; the CLI adds the import to a file
+that receives such code. It returns the entry for the page's language, and the
+first entry (the original copy) for any other language; copy is never translated.
+On an async page the language is the one `track_language(page)` recorded (the
+`page` fixture in `conftest.py` calls it).
+
+### Fingerprints (optional): let the service skip the model
+
+With **`HEAL_FINGERPRINTS=on`**, a pytest plugin (`utils/heal_fingerprints.py`,
+registered in `conftest.py`) records, for each locator a **clean green** test acts
+on, what the page probe sees of the element (attributes, copy, box, frame, page
+path, language; never input values), plus the other elements recorded on the same
+page. At heal time the CLI sends that as `last_pass`, and the service can often
+settle the element with no model call. A fingerprint is written only from a test
+that passed once (no rerun), is not flaky and is not running inside a heal. It is
+off by default and then costs nothing.
+
 ```bash
-# Local / self-hosted OpenAI-compatible endpoint (e.g. Ollama, vLLM, an LLM proxy)
-HEAL_BASE_URL=http://localhost:11434/v1 HEAL_MODEL='your-model-name' python scripts/heal.py
-
-# OpenRouter
-HEAL_BASE_URL=https://openrouter.ai/api/v1 HEAL_MODEL='...' HEAL_API_KEY=sk-or-... python scripts/heal.py
+HEAL_FINGERPRINTS=on HEAL_SERVICE_URL=http://localhost:8765 pytest        # on the green run (CI: default branch)
 ```
 
-**Safety:** the model's reply is only applied if it parses as a chain of approved
-Playwright locator calls with literal arguments on the same receiver as the
-original; only the one diagnosed occurrence is edited (a locator that appears
-more than once is left for a human); an edit is kept only if the exact target test
-ran *and* passed. `--open-pr` requires a clean working tree and commits only the
-healed files. For pages behind login, set `HEAL_STORAGE_STATE=<playwright
-storage-state.json>` so the grounding snapshot is taken as a signed-in user.
+The cache is `.heal/fingerprints.json` (override the folder with `HEAL_DIR`),
+written atomically; `.heal/.gitignore` containing `*` is written for you, so it is
+never committed by accident. Fingerprints change with app versions and viewport
+size, so keep `.heal/` as a CI cache from the last green run on the default branch
+rather than in git. **Opt in to committing it** with
+`HEAL_FINGERPRINTS_COMMIT=on` (the ignore file is then not created); expect churn.
+The probe script is fetched from the service once and cached as `.heal/probe.js`.
 
-**Flags:** `-k <name>` (pytest keyword scope), `--max N`, `--open-pr`,
-`--tickets off|annotate|file` (suspected app-bugs → annotate surfaces a matching
-open ticket; file creates deduped ones; `TICKET_TARGETS=clickup,jira` selects
-systems, needs their creds in env).
+**Known limits:** the page is reopened at the failing route as first loaded, so an
+element that only appears after a click or login step may be missing from the
+inventory (set `HEAL_STORAGE_STATE` for login); only locators the test acts on
+(`click`, `fill`, `check`, `select_option`, ...) are fingerprinted.
 
 > This repo also keeps a **legacy** in-run Ollama healer (the `conftest.py`
 > AI-healing hooks + `AI_HEALING_ENABLED`). That is the older "heal during the
@@ -120,15 +180,15 @@ No LLM needed to author — record, then refactor:
    flow into a page object + test matching `pages/login_page.py`") costs a fraction
    of an explore/generate loop. Don't use it to *explore*.
 4. **Maintenance stays cheap** — the `heal.py` CLI runs only on failures and can
-   point at a **local/cheap model** (e.g. local Ollama), so keeping tests green
-   never burns your agent budget.
+   talk to a heal service that you point at a **local/cheap model**, so keeping tests
+   green never burns your agent budget.
 
 Conventions either way: one feature per test module, pytest markers, resilient
 semantic locators, data-agnostic assertions, and page objects for anything reused.
 
 ## Which path?
 - **Authoring new tests / interactive triage** → Path 1 (Claude Code + agents).
-- **CI, nightly, unattended, swap models freely** → Path 2 (the `heal` CLI).
+- **CI, nightly, unattended, swap models in one place (the service)** → Path 2 (the `heal` CLI).
 
 ---
 

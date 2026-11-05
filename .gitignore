@@ -52,3 +52,6 @@ data/stability_history.json.tmp
 
 # Standard reporter output (JUnit XML, HTML report, traces, screenshots)
 results/
+
+# Heal client run output
+test_artifacts/heal-summary.json
