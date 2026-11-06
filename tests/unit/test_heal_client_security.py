@@ -479,3 +479,27 @@ class TestLow:
         new = plan_patches(candidate(project, to=to, branches=br), {"pages/login_page.py": sha(text)}, ("pages",),
                            project)[0].new_text
         assert new.count("import by_language") == 1
+
+
+class TestHostileServiceJson:
+    """A service reply nested deep enough to overflow the JSON parser is a bad reply, not a crash."""
+
+    def _client(self, status, body):
+        import httpx
+        from utils.heal_client import ServiceClient
+        transport = httpx.MockTransport(lambda request: httpx.Response(status, content=body))
+        return ServiceClient("https://svc.example", token="t", http=httpx.Client(transport=transport))
+
+    def test_a_deeply_nested_reply_raises_a_service_error(self):
+        import pytest
+        from utils.heal_client import HealServiceError
+        deep = b"[" * 200000 + b"]" * 200000
+        with pytest.raises(HealServiceError):
+            self._client(200, deep).capabilities()
+
+    def test_an_error_reply_that_is_deep_or_not_an_object_still_reports_the_status(self):
+        import pytest
+        from utils.heal_client import HealServiceError
+        for body in (b"[" * 200000 + b"]" * 200000, b'["x"]'):
+            with pytest.raises(HealServiceError, match="500"):
+                self._client(500, body).capabilities()

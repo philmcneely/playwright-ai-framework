@@ -158,8 +158,9 @@ class ServiceClient:
             raise HealServiceError(f"the heal service could not be reached ({type(e).__name__})") from None
         if resp.status_code >= 400:
             try:
-                detail = resp.json().get("detail")
-            except ValueError:
+                body_json = resp.json()
+                detail = body_json.get("detail") if isinstance(body_json, dict) else None
+            except (ValueError, RecursionError, MemoryError):
                 detail = None
             raise HealServiceError(f"the heal service answered {resp.status_code}: " + str(detail or resp.reason_phrase)[:300])
         return resp
@@ -167,8 +168,9 @@ class ServiceClient:
     def _json(self, resp: httpx.Response) -> Dict[str, Any]:
         try:
             data = resp.json()
-        except ValueError:
-            raise HealServiceError("the heal service sent a reply that is not JSON") from None
+        except (ValueError, RecursionError, MemoryError):
+            # An untrusted service can nest JSON deep enough to blow the parser's stack; that is a bad reply, not a crash.
+            raise HealServiceError("the heal service sent a reply that is not usable JSON") from None
         if not isinstance(data, dict):
             raise HealServiceError("the heal service sent a reply that is not a JSON object")
         return data
