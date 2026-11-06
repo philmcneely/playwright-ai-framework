@@ -16,7 +16,6 @@ import functools
 import http.server
 import re
 import threading
-from pathlib import Path
 
 import pytest
 
@@ -109,8 +108,8 @@ def make_service():
         opened.append(http)
         return ServiceClient("http://testserver", "", http), core
     yield build
-    for http in opened:
-        http.close()
+    for client in opened:
+        client.close()
 
 
 @pytest.fixture
