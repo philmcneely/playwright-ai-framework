@@ -124,6 +124,17 @@ Author: PMAC
           item['data_' + n.slice(5).replace(/-/g, '_')] = at(n).slice(0, 80);
         }
       }
+      // Whether this element (or something inside it) is what a click at its box centre would hit. The service's
+      // place proof needs it: a box alone can be taken over by another element moved into the freed spot. Only for a
+      // centre inside the element's own viewport; off-screen is unknown, not false.
+      if (item.box) {
+        const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+        if (cx >= 0 && cy >= 0 && cx < win.innerWidth && cy < win.innerHeight) {
+          const rootNode = el.getRootNode();
+          const hit = (rootNode.elementFromPoint ? rootNode : el.ownerDocument).elementFromPoint(cx, cy);
+          item.top_at_center = !!hit && (hit === el || el.contains(hit));
+        }
+      }
       const row = rowOf(el);
       if (row) item.row = row;
       if (frame) item.frame = frame;

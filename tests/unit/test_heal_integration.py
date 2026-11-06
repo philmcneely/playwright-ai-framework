@@ -51,7 +51,7 @@ pytestmark = pytest.mark.skipif(not _chromium_available(), reason="no Playwright
 LOGIN_EN = ('<html lang="en"><body><form><label for="u">Username</label>'
             '<input id="u" name="user" data-testid="login-user"><button type="submit">Log in</button></form></body></html>')
 LOGIN_FR = ('<html lang="fr"><body><form><div>Connexion</div>'
-            '<button type="submit">Continuer</button></form></body></html>')
+            '<button type="submit">Valider</button></form></body></html>')
 PAGE_PY = (
     "class LoginPage:\n"
     "    def __init__(self, page):\n"
@@ -163,22 +163,22 @@ def test_french_page_gets_a_by_language_branch_the_helper_reads(tmp_path, site, 
     www, base = site
     (www / "login.html").write_text(LOGIN_FR)
     root = project(tmp_path / "proj", BUTTON_PY)
-    # the passing run was in English: a submit button with the copy "Continue"; the page now reads French ("Continuer"). The
-    # service refuses a pick it cannot prove is the element the step meant: here the recorded box (the button's place) and
-    # the cognate copy are the proof, as a real fingerprint run records them. A wholly different translation would prove
-    # nothing and would end as needs_human, which is the service's call.
+    # the passing run was in English: a submit button with the copy "Continue"; the page now reads French ("Valider"), a
+    # translation that shares no word with the English. The service refuses a pick it cannot prove is the element the step
+    # meant; here the page language changed (en -> fr), so the recorded box (the button's place) and its kind are the
+    # proof, as a real fingerprint run records them.
     fp.merge_into(root, {fp.call_key("pages/login_page.py", CLICK_LINE): {
         "file": "pages/login_page.py", "text": CLICK_LINE, "page": "/login.html", "language": "en",
         "fingerprint": {"tag": "button", "type": "submit", "role": "button", "text": "Continue", "name": "Continue",
                         "box": {"x": 8, "y": 26, "w": 74, "h": 21}}}}, env={})
-    model = StubModel(wanted="Continuer")
+    model = StubModel(wanted="Valider")
     client, core = make_service(model)
     d = healer(root, base, client).heal({"name": "test_login", "classname": "tests.test_login", "error": error_for(7, "#login-button")})
     assert d["outcome"] == "healed", d
     assert model.calls == 1 and d["settled_at"] == 3 and d["usage"]["input_tokens"] == 100 and d["usage"]["output_tokens"] == 8
     new = (root / "pages" / "login_page.py").read_text()
     assert "by_language(self.page," in new and '"fr"' in new and '"en"' in new
-    assert "Continue" in new and "Continuer" in new              # copy is kept per language, never translated
+    assert "Continue" in new and "Valider" in new              # copy is kept per language, never translated
     assert "from utils.heal_locale import by_language\n" in new
     compile(new, "login_page.py", "exec")                            # the edited page object is still valid Python
     from playwright.sync_api import sync_playwright
