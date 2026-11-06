@@ -9,7 +9,13 @@ the element, its box, its frame, the page path and language, into `.heal/fingerp
 acted on it. At heal time `scripts/heal.py` looks the failing line up and sends the result as `last_pass`, together with the
 other elements recorded on the same page (`neighbours`), so the service can tell a renamed element from a different one.
 
-It holds attributes, copy and boxes only. Never input values (the probe does not read them), screenshots or HTML.
+It holds attributes, copy and boxes only. Never input values (the probe does not read them), screenshots or HTML. Element
+COPY (an element's text, label, name, placeholder, row and its aria-label, title and alt) IS stored, and the copy of a page
+can hold personal data: a name in a table row, an account holder on a card, an address in a link. `.heal/` is git-ignored by
+default, but it is a file on disk and its content is sent to the heal service as `last_pass`. Set HEAL_FINGERPRINT_COPY=off
+to store `sha256:<hex>` of the normalized copy (case and spacing folded) instead of the copy itself. Tags, roles, ids, test
+ids and boxes stay readable. Hashed copy only matches by equality, so the service's match must compare hashed copy to hashed
+copy; until it does, copy-based proof is weaker with the switch off (identity and place proof are unaffected).
 
 Off unless HEAL_FINGERPRINTS=on, and then it costs one small in-page call per distinct locator line per test. With it off,
 the hooks below return at once and no Playwright class is touched.
@@ -19,8 +25,8 @@ a low stability index, and it is not running inside a heal (HEAL_RUN is set by s
 
 Features:
     ✓ Key = (source file, normalized text of the acting line): the same key at record time and at heal time
-    ✓ Facts come from the service's own probe (GET /v1/probe.js, run on the one element), so Python and TypeScript clients
-      record the same data; the script is cached in `.heal/probe.js` so a later offline run still works
+    ✓ Facts come from the vendored probe (utils/heal_probe.js, run on the one element, the same script the heal client runs),
+      so Python and TypeScript clients record the same data; no script is ever fetched and cached from the network
     ✓ `.heal/fingerprints.json` is written atomically (temp file + rename) under a file lock, merged with what other
       workers wrote, and only rewritten when something changed
     ✓ `.heal/.gitignore` containing `*` is written automatically, so the cache is never committed by accident; set
@@ -30,20 +36,26 @@ Features:
 Environment Variables:
     HEAL_FINGERPRINTS: "on" to record (default off)
     HEAL_FINGERPRINTS_COMMIT: "on" to allow committing .heal/ (default off: .heal/.gitignore with `*` is written)
-    HEAL_DIR: where the cache lives (default .heal)
-    HEAL_SOURCE_ROOTS: comma separated source roots whose lines are recorded (default pages,tests,utils)
-    HEAL_SERVICE_URL, HEAL_SERVICE_TOKEN: where the probe script is fetched from
+    HEAL_FINGERPRINT_COPY: "off" to store hashes of element copy instead of the copy (default on: copy is stored)
+    HEAL_DIR: where the cache lives, a relative path inside the repository (default .heal; anything else warns and falls
+      back to the default)
+    HEAL_SOURCE_ROOTS: comma separated source roots whose lines are recorded, relative paths inside the repository (default
+      pages,tests,utils)
+    HEAL_SERVICE_URL, HEAL_SERVICE_TOKEN, HEAL_PROBE_FROM_SERVICE: the probe is the vendored utils/heal_probe.js; the
+      service's copy is used only with HEAL_PROBE_FROM_SERVICE=1 and only when it is byte-identical
     HEAL_RUN: set by scripts/heal.py while it runs the suite; nothing is recorded then
 
 Author: PMAC
 ===============================================================================
 """
+import hashlib
 import json
 import linecache
 import os
 import re
 import sys
 import tempfile
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
@@ -59,6 +71,8 @@ ACTIONS = ("click", "dblclick", "fill", "check", "uncheck", "set_checked", "sele
            "wait_for")
 MAX_NEIGHBOURS = 100                     # the service accepts at most this many
 _TEXT_KEYS = ("tag", "type", "role", "name", "label", "placeholder", "text", "row")
+_COPY_KEYS = ("name", "label", "placeholder", "text", "row")      # element copy: may hold personal data
+_COPY_ATTRS = ("aria-label", "title", "alt")
 _ATTR_NAMES = {"testid": "data-testid", "id": "id", "name_attr": "name", "aria_label": "aria-label", "title": "title",
                "alt": "alt", "class": "class"}
 _FIELD_MAX = 400
@@ -68,12 +82,39 @@ _FIELD_MAX = 400
 def source_roots(env: Optional[Dict[str, str]] = None) -> Tuple[str, ...]:
     """The source roots (HEAL_SOURCE_ROOTS, comma separated, relative), default pages, tests, utils."""
     raw = (env if env is not None else os.environ).get("HEAL_SOURCE_ROOTS", "")
-    roots = tuple(r.strip().strip("/") for r in raw.split(",") if r.strip().strip("/") and ".." not in r)
+    roots = tuple(r.strip().rstrip("/") for r in raw.split(",") if safe_relative(r) is not None)
     return roots or DEFAULT_ROOTS
 
 
+def safe_relative(value: str) -> Optional[str]:
+    """`value` as a relative posix path that stays inside its base (no absolute path, drive, `~`, backslash, NUL or `..`),
+    else None."""
+    v = (value or "").strip()
+    if not v.strip("/") or v.startswith(("/", "~")) or "\\" in v or ":" in v or "\x00" in v:
+        return None
+    parts = v.rstrip("/").split("/")
+    return v.rstrip("/") if all(p not in ("", "..") for p in parts) else None
+
+
 def heal_dir(root: Path, env: Optional[Dict[str, str]] = None) -> Path:
-    return root / (env if env is not None else os.environ).get("HEAL_DIR", ".heal")
+    """The cache directory: HEAL_DIR when it is a relative path that resolves (symlinks followed) inside the repository,
+    else `.heal` with a warning. A cache that could be pointed anywhere would let a variable write files anywhere."""
+    value = (env if env is not None else os.environ).get("HEAL_DIR", ".heal")
+    rel = safe_relative(value)
+    if rel is not None:
+        try:
+            (root / rel).resolve().relative_to(root.resolve())
+            return root / rel
+        except (ValueError, OSError):
+            pass
+    warnings.warn("HEAL_DIR must be a relative path inside the repository; using .heal instead", UserWarning, stacklevel=2)
+    return root / ".heal"
+
+
+def copy_mode(env: Optional[Dict[str, str]] = None) -> str:
+    """"off" when HEAL_FINGERPRINT_COPY=off (store hashes of element copy), else "on"."""
+    value = (env if env is not None else os.environ).get("HEAL_FINGERPRINT_COPY", "on").strip().lower()
+    return "off" if value == "off" else "on"
 
 
 def enabled(env: Optional[Dict[str, str]] = None) -> bool:
@@ -125,8 +166,15 @@ def call_site(root: Path, roots: Tuple[str, ...], depth: int = 1) -> Optional[Tu
 
 
 # ---- the facts -------------------------------------------------------------------------------------------------------
-def item_to_fingerprint(item: Dict[str, Any], frame: str = "") -> Dict[str, Any]:
-    """A probe item as the service's fingerprint shape: copy and role facts, an attrs bag, a w/h box, never a value."""
+def hash_copy(text: str) -> str:
+    """`sha256:<hex>` of `text` with case and spacing folded: equal copy hashes equal, the copy itself is not kept."""
+    return "sha256:" + hashlib.sha256(" ".join(str(text).split()).casefold().encode("utf-8")).hexdigest()
+
+
+def item_to_fingerprint(item: Dict[str, Any], frame: str = "", copy: str = "on") -> Dict[str, Any]:
+    """A probe item as the service's fingerprint shape: copy and role facts, an attrs bag, a w/h box, never a value.
+    Element copy (text, label, name, placeholder, row, aria-label, title, alt) is stored as it is, and may hold personal
+    data; with copy="off" (HEAL_FINGERPRINT_COPY=off) a hash of it is stored instead."""
     fp: Dict[str, Any] = {k: str(item[k])[:_FIELD_MAX] for k in _TEXT_KEYS if item.get(k)}
     attrs: Dict[str, str] = {}
     for key, value in item.items():
@@ -136,6 +184,13 @@ def item_to_fingerprint(item: Dict[str, Any], frame: str = "") -> Dict[str, Any]
             attrs[_ATTR_NAMES[key]] = value[:_FIELD_MAX]
         elif key.startswith("data_"):
             attrs["data-" + key[5:].replace("_", "-")] = value[:_FIELD_MAX]
+    if copy == "off":
+        for k in _COPY_KEYS:
+            if k in fp:
+                fp[k] = hash_copy(fp[k])
+        for k in _COPY_ATTRS:
+            if k in attrs:
+                attrs[k] = hash_copy(attrs[k])
     if attrs:
         fp["attrs"] = dict(list(attrs.items())[:40])
     frame = frame or item.get("frame") or ""
@@ -249,24 +304,16 @@ class Recorder:
         self._probe_failed = False
 
     def probe_script(self) -> Optional[str]:
-        """The service's probe script: fetched once, cached in .heal/probe.js, read back from there when offline."""
+        """The page probe: the vendored utils/heal_probe.js (or, with HEAL_PROBE_FROM_SERVICE=1, the service's copy when it
+        is byte-identical to it). Nothing is cached on disk, so a file that a service once wrote cannot be run later."""
         if self._probe is not None or self._probe_failed:
             return self._probe
-        cache = heal_dir(self.root, self.env) / "probe.js"
         try:
             from utils.heal_client import HealSettings, ServiceClient
             settings = HealSettings.from_env(self.env)
-            if not settings.url:
-                raise RuntimeError("HEAL_SERVICE_URL is not set")
-            self._probe = ServiceClient(settings.url, settings.token).probe_js()
-            ensure_ignore(cache.parent, self.env)
-            cache.parent.mkdir(parents=True, exist_ok=True)
-            _atomic_write(cache, self._probe)
+            self._probe = ServiceClient(settings.url, settings.token, env=self.env).probe_js()
         except Exception:
-            try:
-                self._probe = cache.read_text(encoding="utf-8")
-            except OSError:
-                self._probe_failed = True
+            self._probe_failed = True
         return self._probe
 
     def start_test(self, item: Any) -> None:
@@ -295,7 +342,7 @@ class Recorder:
             meta = data.get("page") or {}
             language = (meta.get("lang") or meta.get("browser_lang") or "").split("-", 1)[0].lower()
             self.pending[key] = {"file": site[0], "text": normalize_line(site[2]), "page": page_path(meta.get("path") or "/"),
-                                 "language": language, "fingerprint": item_to_fingerprint(items[0], frame or "")}
+                                 "language": language, "fingerprint": item_to_fingerprint(items[0], frame or "", copy_mode(self.env))}
         except Exception:
             if key is not None:
                 self.pending.pop(key, None)

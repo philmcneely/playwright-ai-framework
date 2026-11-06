@@ -25,7 +25,16 @@ Features:
       overlapping spans, a replacement that fails validate_replacement, a branch set that does not match the code
     ✓ A service or browser error ends that heal as needs_human with the reason; it never crashes the run
     ✓ Language branches: the by_language helper (utils/heal_locale.py) is imported into a file that receives branch code
-    ✓ Input values are never sent: the probe does not read them, and no cookie, storage state or screenshot leaves the client
+    ✓ Input values are never sent: the aria snapshot goes through heal_redact.redact_typed_values and the inventory is cut to
+      an allowlist of keys on THIS side, whatever the service or its probe promises; no cookie, storage state or screenshot
+      leaves the client
+    ✓ Every service reply is untrusted: a replacement is one expression with no comment and no control character whose
+      unparse round-trips; the original span must be a pure locator chain AND exactly one expression node of the file on
+      disk; the code written is the code checked live (every also-patch is checked live too); a file is written in place
+      with its mode, never through a symlink and never outside its source root; a partial multi-file write is reverted
+    ✓ The probe is vendored (utils/heal_probe.js) and runs with page requests to origins other than BASE_URL blocked; the
+      service's copy is used only with HEAL_PROBE_FROM_SERVICE=1 and only when its sha256 equals the vendored file's
+    ✓ A bearer token is never sent over http:// to a host other than localhost unless HEAL_ALLOW_INSECURE=1
 
 Environment Variables:
     HEAL_SERVICE_URL: base URL of the heal service, for example http://localhost:8765
@@ -33,7 +42,9 @@ Environment Variables:
     HEAL_VISION: off | auto | on (accepted; screenshots are not captured by this client, so it is always off)
     HEAL_MASK: locators to mask in a screenshot (accepted, unused until vision)
     HEAL_TEST_ID_ATTRIBUTE: the project's test id attribute (default data-testid)
-    HEAL_SOURCE_ROOTS: comma separated source roots (default pages,tests,utils)
+    HEAL_SOURCE_ROOTS: comma separated source roots, relative paths inside the repository (default pages,tests,utils)
+    HEAL_PROBE_FROM_SERVICE: "1" to fetch the probe from the service (used only when it is byte-identical to the vendored one)
+    HEAL_ALLOW_INSECURE: "1" to send the bearer token over http:// to a host other than localhost
     HEAL_STORAGE_STATE: Playwright storage-state file used to open the page as a signed-in user (never sent)
     BASE_URL: the app under test (default http://localhost:7080)
 
@@ -44,17 +55,25 @@ import ast
 import hashlib
 import json
 import os
+import io
 import re
+import stat
+import tokenize
+import unicodedata
 import uuid
+import warnings
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 import httpx
 
-from utils.heal_fingerprints import (call_key, last_pass_for, line_of, load_store, relative_under, source_roots)
+from utils.heal_fingerprints import (call_key, heal_dir, last_pass_for, line_of, load_store, relative_under, source_roots)
 from utils.heal_locale import page_language
+from utils.heal_redact import clean_inventory, redact_typed_values
 
 LIMITS = {"files": 20, "file_bytes": 256 * 1024, "aria_chars": 256 * 1024}
 HELPER = "by_language"
@@ -67,6 +86,10 @@ ALLOWED_LOCATOR_METHODS = {
     "get_by_test_id", "get_by_alt_text", "get_by_title", "first", "last", "nth", "filter",
 }
 _LANG_KEY = re.compile(r"^[a-z]{2,3}$")
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+_NETWORK_SCHEMES = {"http", "https", "ws", "wss"}
+_BAD_CATEGORIES = {"Cc", "Cf", "Zl", "Zp"}              # control, format (bidi), line and paragraph separators
+PROBE_FILE = Path(__file__).with_name("heal_probe.js")
 _TRACE_LINE = re.compile(r"^\s*(\S+?\.py):(\d+)\b", re.M)
 
 
@@ -96,6 +119,12 @@ class HealSettings:
 
 
 # ---- the service -----------------------------------------------------------------------------------------------------
+@lru_cache(maxsize=1)
+def vendored_probe() -> str:
+    """The page probe shipped in this repository (a copy of the service's, never fetched from it by default)."""
+    return PROBE_FILE.read_text(encoding="utf-8")
+
+
 class HealServiceError(Exception):
     """The service could not be reached or refused a call. The message names the status and reason, never the request."""
 
@@ -103,13 +132,25 @@ class HealServiceError(Exception):
 class ServiceClient:
     """The service's HTTP API. `http` may be any httpx.Client (a test passes one on a MockTransport or an ASGI app)."""
 
-    def __init__(self, base_url: str, token: str = "", http: Optional[httpx.Client] = None, timeout: float = 200.0):
+    def __init__(self, base_url: str, token: str = "", http: Optional[httpx.Client] = None, timeout: float = 200.0,
+                 env: Optional[Dict[str, str]] = None):
         self.base = base_url.rstrip("/")
         self.http = http or httpx.Client(timeout=timeout)
         self.headers = {"Authorization": f"Bearer {token}"} if token else {}
+        self.env = env if env is not None else os.environ
         self._probe: Optional[str] = None
+        parts = urlsplit(self.base)
+        self._insecure = bool(token) and parts.scheme == "http" and (parts.hostname or "") not in _LOCAL_HOSTS \
+            and self.env.get("HEAL_ALLOW_INSECURE") != "1"
+        if self._insecure:
+            warnings.warn("HEAL_SERVICE_TOKEN would travel over plain http:// to a host other than localhost; the heal "
+                          "client refuses to send it (use https://, or set HEAL_ALLOW_INSECURE=1 on a trusted network)",
+                          UserWarning, stacklevel=2)
 
     def _call(self, method: str, path: str, body: Optional[Dict[str, Any]] = None) -> httpx.Response:
+        if self._insecure:
+            raise HealServiceError("refusing to send the bearer token over http:// to a host other than localhost "
+                                   "(use https://, or set HEAL_ALLOW_INSECURE=1)")
         try:
             resp = self.http.request(method, self.base + path, headers=self.headers,
                                      content=json.dumps(body).encode() if body is not None else None)
@@ -136,9 +177,16 @@ class ServiceClient:
         return self._json(self._call("GET", "/v1/capabilities"))
 
     def probe_js(self) -> str:
-        """The in-page probe script, fetched once per client."""
+        """The in-page probe script: the vendored copy (utils/heal_probe.js). With HEAL_PROBE_FROM_SERVICE=1 the service's
+        copy is fetched and checked byte for byte against it (sha256); a different script is refused, never run."""
         if self._probe is None:
-            self._probe = self._call("GET", "/v1/probe.js").text
+            vendored = vendored_probe()
+            if self.env.get("HEAL_PROBE_FROM_SERVICE") == "1":
+                served = self._call("GET", "/v1/probe.js").content
+                if _sha(served) != _sha(vendored.encode("utf-8")):
+                    raise HealServiceError("the service's probe script differs from the vendored one (sha256), so it is "
+                                           "refused")
+            self._probe = vendored
         return self._probe
 
     def heal(self, request: Dict[str, Any]) -> Dict[str, Any]:
@@ -149,19 +197,70 @@ class ServiceClient:
 
 
 # ---- the locator validator (a second check on everything the service sends) -------------------------------------------
+def _has_control(text: str) -> bool:
+    """True when `text` holds a control character (a carriage return, form feed, tab, NUL, C1), a bidi or other format
+    character, or a line or paragraph separator: anything that can hide or end a line differently from how it reads."""
+    return any(unicodedata.category(c) in _BAD_CATEGORIES for c in text)
+
+
+def _token_values(text: str) -> Optional[List[Tuple[str, Any]]]:
+    """The tokens of `text` that carry meaning (strings by value, so quote style does not matter), or None when it holds a
+    comment, cannot be tokenized, or has an error token."""
+    out: List[Tuple[str, Any]] = []
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+            if tok.type == tokenize.COMMENT or tok.type == tokenize.ERRORTOKEN:
+                return None
+            if tok.type in (tokenize.NEWLINE, tokenize.NL, tokenize.ENDMARKER, tokenize.INDENT, tokenize.DEDENT):
+                continue
+            if tok.type == tokenize.STRING:
+                try:
+                    out.append(("string", ast.literal_eval(tok.string)))
+                    continue
+                except (ValueError, SyntaxError):
+                    return None
+            out.append((tokenize.tok_name[tok.type], tok.string))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return None
+    return out
+
+
+def _single_expression(text: Any) -> Optional[ast.expr]:
+    """The expression `text` is, when it is exactly one on one line with no comment and no control character, and its
+    ast.unparse round-trips (the same tokens once quote style and spacing are normalized). Otherwise None."""
+    if not isinstance(text, str) or not text.strip() or "\n" in text or ";" in text or _has_control(text):
+        return None
+    try:
+        tree = ast.parse(text, mode="eval")
+        normal = ast.unparse(tree)
+        if ast.unparse(ast.parse(normal, mode="eval")) != normal:
+            return None
+    except (SyntaxError, ValueError, RecursionError):
+        return None
+    given = _token_values(text)
+    if given is None or given != _token_values(normal):
+        return None
+    return tree.body
+
+
+def _normal(text: Any) -> Optional[str]:
+    """`text` in its normalized form (ast.unparse), or None when it is not a single clean expression."""
+    tree = _single_expression(text)
+    return ast.unparse(tree) if tree is not None else None
+
+
 def validate_replacement(proposed, original):
     """
     Return the replacement if it is a safe drop-in for ``original``, else None.
-    Must be a single-line expression that is a chain of approved Playwright
-    locator calls with literal arguments, rooted at the same receiver
-    (``page`` / ``self.page``) as the original.
+    Must be a single-line expression, with no comment and no control character, that is a chain of approved Playwright
+    locator calls with literal arguments, rooted at the same receiver (``page`` / ``self.page``) as the original.
     """
-    if not proposed or "\n" in proposed or ";" in proposed:
+    tree = _single_expression(proposed)
+    if tree is None or not isinstance(original, str):
         return None
     try:
-        tree = ast.parse(proposed, mode="eval").body
         original_tree = ast.parse(original, mode="eval").body
-    except SyntaxError:
+    except (SyntaxError, ValueError):
         return None
 
     def receiver(node):
@@ -239,10 +338,12 @@ def check_replacement(to: str, original: str, branches: Optional[Dict[str, str]]
     A plain locator must pass validate_replacement. Branch code (by_language(receiver, {...})) must name the same languages
     as `branches`, carry the same locator for each (`exact_branches`; a patch in another file has its own receiver), and
     EVERY branch must pass validate_replacement on its own."""
+    if validate_replacement(original, original) is None:
+        return "the expression to replace is not a plain locator chain"
     if to == original:
         return "the replacement is identical to the failing locator"
-    if "\n" in to or ";" in to:
-        return "the replacement is not a single expression"
+    if _single_expression(to) is None:
+        return "the replacement is not a single clean expression (no comment, control character or second statement)"
     if HELPER + "(" in to or branches:
         parsed = _branch_dict(to)
         if parsed is None or not branches:
@@ -330,17 +431,33 @@ def read_text_file(root: Path, rel: str) -> Optional[Tuple[str, bytes]]:
         return None
 
 
+def within_roots(root: Path, rel: str, roots: Tuple[str, ...]) -> bool:
+    """True when `rel` is listed under a source root AND its real path (every symlink followed) is inside that root's real
+    path, which itself must be inside the repository. A symlink to another root, to the repo's top level or out of the
+    repository does not count."""
+    try:
+        base = root.resolve()
+        real = (root / rel).resolve()
+        for r in roots:
+            if rel.startswith(r + "/"):
+                top = (root / r).resolve()
+                try:
+                    top.relative_to(base)
+                    real.relative_to(top)
+                    return True
+                except ValueError:
+                    continue
+    except OSError:
+        pass
+    return False
+
+
 def collect_source(stack: List[Dict[str, Any]], roots: Tuple[str, ...], root: Path) -> List[Dict[str, str]]:
     """The files named in the failing stack that sit under the source roots, as {path, sha256, content}. At most 20 files,
-    256 KB each; a file inside a symlink that leaves the repository is skipped."""
+    256 KB each; a file whose real path (symlinks followed) is not inside the source root it is listed under is skipped."""
     files: List[Dict[str, str]] = []
-    base = root.resolve()
     for rel in dict.fromkeys(f["file"] for f in stack):
-        if len(files) >= LIMITS["files"] or not any(rel.startswith(r + "/") for r in roots):
-            continue
-        try:
-            (root / rel).resolve().relative_to(base)
-        except (ValueError, OSError):
+        if len(files) >= LIMITS["files"] or not within_roots(root, rel, roots):
             continue
         got = read_text_file(root, rel)
         if got and len(got[1]) <= LIMITS["file_bytes"]:
@@ -377,8 +494,10 @@ def build_request(failure: Dict[str, Any], files: List[Dict[str, str]], stack: L
         "test_id_attribute": settings.test_id_attribute,
         "run": {"id": run_id or uuid.uuid4().hex[:12]},
     }
-    if page.get("aria") and len(page["aria"]) <= LIMITS["aria_chars"]:
-        req["page"]["aria_snapshot"] = page["aria"]
+    req["page"]["inventory"] = clean_inventory(page["inventory"])          # allowlisted keys only, never a value
+    aria = redact_typed_values(page["aria"]) if isinstance(page.get("aria"), str) else ""
+    if aria and len(aria) <= LIMITS["aria_chars"]:
+        req["page"]["aria_snapshot"] = aria
     if last_pass:
         req["last_pass"] = last_pass
     repo = os.environ.get("HEAL_REPO")
@@ -419,9 +538,13 @@ def plan_patches(candidate: Dict[str, Any], sent: Dict[str, str], roots: Tuple[s
         why = check_replacement(p["to"], p["from"], branches, exact_branches=(i == 0))
         if why:
             raise PatchRefused(why)
+        if i == 0 and not branches and (_normal(p["to"]) is None or _normal(p["to"]) != _normal(candidate.get("code"))):
+            raise PatchRefused("the patch is not the locator that was checked in the live page")
         by_file.setdefault(rel, []).append(p)
     planned: List[PlannedFile] = []
     for rel, group in by_file.items():
+        if (root / rel).is_symlink() or not within_roots(root, rel, roots):
+            raise PatchRefused(f"{rel} is a symlink or leaves its source root", fatal=True)
         got = read_text_file(root, rel)
         if got is None:
             raise PatchRefused(f"{rel} cannot be read", fatal=True)
@@ -436,13 +559,57 @@ def plan_patches(candidate: Dict[str, Any], sent: Dict[str, str], roots: Tuple[s
             if not (0 <= start <= end <= len(text)) or start < end_prev or text[start:end] != p["from"]:
                 raise PatchRefused(f"the span in {rel} does not hold the text the service expected", fatal=True)
             end_prev = end
+        nodes = _expression_spans(text)
+        if nodes is None:
+            raise PatchRefused(f"{rel} does not parse as Python (syntax error), so its spans cannot be checked", fatal=True)
+        for start, end, p in spans:
+            if (start, end) not in nodes:
+                raise PatchRefused(f"the span in {rel} is not one expression of the file's syntax tree", fatal=True)
         new = text
         for start, end, p in reversed(spans):
             new = new[:start] + p["to"] + new[end:]
-        if HELPER + "(" in new and HELPER_IMPORT not in new and f"import {HELPER}" not in new:
+        if HELPER + "(" in new and not _imports_helper(new):
             new = _with_helper_import(new)
         planned.append(PlannedFile(rel, raw, new))
     return planned
+
+
+_LINE = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
+
+
+def _expression_spans(text: str) -> Optional[set]:
+    """{(start, end)} character spans of every expression node of `text`, or None when it does not parse. ast columns are
+    UTF-8 byte offsets within a line; they are turned into offsets in `text` here."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError, RecursionError):
+        return None
+    lines = _LINE.findall(text)
+    starts, total = [], 0
+    for line in lines:
+        starts.append(total)
+        total += len(line)
+
+    def offset(lineno: int, col: int) -> int:
+        line = lines[lineno - 1] if lineno - 1 < len(lines) else ""
+        return starts[lineno - 1] + len(line.encode("utf-8")[:col].decode("utf-8", "ignore"))
+
+    spans = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.expr) and getattr(node, "end_lineno", None) is not None:
+            spans.add((offset(node.lineno, node.col_offset), offset(node.end_lineno, node.end_col_offset)))
+    return spans
+
+
+def _imports_helper(source: str) -> bool:
+    """True when `source` has a real `from utils.heal_locale import by_language` statement (a comment or a string that
+    says so does not count)."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return False
+    return any(isinstance(n, ast.ImportFrom) and n.module == "utils.heal_locale" and n.level == 0
+               and any(a.name == HELPER and a.asname is None for a in n.names) for n in ast.walk(tree))
 
 
 def _with_helper_import(source: str) -> str:
@@ -469,14 +636,41 @@ def write_files(root: Path, planned: List[PlannedFile]) -> None:
 
 
 def revert_files(root: Path, planned: List[PlannedFile]) -> None:
+    """Put every file's original bytes back. One file failing does not stop the others; the first error is raised after."""
+    first: Optional[BaseException] = None
     for pf in planned:
-        _replace(root / pf.rel, pf.original)
+        try:
+            _replace(root / pf.rel, pf.original)
+        except Exception as e:                                 # keep restoring the rest
+            first = first or e
+    if first is not None:
+        raise first
 
 
 def _replace(path: Path, data: bytes) -> None:
+    """Write `data` over a regular file with the file's own mode: a temp file next to it (created with that mode, never
+    following a symlink) and an atomic rename. A symlink, or anything that is not a regular file, is refused."""
+    st = os.lstat(path)
+    if not stat.S_ISREG(st.st_mode):
+        raise OSError(f"refusing to write {path.name}: it is not a regular file (a symlink is never followed)")
+    mode = stat.S_IMODE(st.st_mode)
     tmp = path.with_name(path.name + ".heal-tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, path)
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.chmod(tmp, mode)                                    # the umask may have narrowed it at creation
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 # ---- the live page ---------------------------------------------------------------------------------------------------
@@ -495,6 +689,45 @@ def match_ref(inventory: List[Dict[str, Any]], facts: Dict[str, Any]) -> Optiona
     return loose[0] if len(loose) == 1 else None
 
 
+def _origin(url: str) -> Tuple[str, str, int]:
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    try:
+        port = parts.port or {"http": 80, "https": 443, "ws": 80, "wss": 443}.get(scheme, 0)
+    except ValueError:
+        port = -1
+    return scheme, (parts.hostname or "").lower(), port
+
+
+class OriginGuard:
+    """Playwright route handler: while `probing` is True, a request to an origin other than BASE_URL's is aborted, so the
+    probe (or anything a page wires to run while it is evaluated) cannot send what it reads to another site. Outside a
+    probe every request goes through untouched."""
+
+    def __init__(self, base_url: str):
+        self.origin = _origin(base_url)
+        self.probing = False
+
+    def handle(self, route: Any, request: Any = None) -> None:
+        url = (request or route.request).url
+        foreign = urlsplit(url).scheme.lower() in _NETWORK_SCHEMES and _origin(url) != self.origin
+        try:
+            if self.probing and foreign:
+                route.abort()
+            else:
+                route.continue_()
+        except Exception:                                      # the page closed under the route
+            pass
+
+    @contextmanager
+    def active(self) -> Iterator[None]:
+        self.probing = True
+        try:
+            yield
+        finally:
+            self.probing = False
+
+
 class LivePage:
     """A fresh Chromium on the failing route (HEAL_STORAGE_STATE when set). It stays open for the whole heal so each
     candidate can be checked on the same page the inventory came from. Never screenshots."""
@@ -503,6 +736,7 @@ class LivePage:
         self.settings, self.route, self.probe = settings, route or "/", probe
         self.inventory: List[Dict[str, Any]] = []
         self.language = ""
+        self.guard = OriginGuard(settings.base_url)
         self._p = self._browser = self.page = None
 
     def __enter__(self) -> "LivePage":
@@ -513,6 +747,7 @@ class LivePage:
             ctx = self._browser.new_context(
                 base_url=self.settings.base_url,
                 **({"storage_state": self.settings.storage_state} if self.settings.storage_state else {}))
+            ctx.route("**/*", self.guard.handle)
             self.page = ctx.new_page()
             self._response = self.page.goto(self.route)
         except BaseException:
@@ -530,17 +765,20 @@ class LivePage:
 
     def snapshot(self) -> Dict[str, Any]:
         """Run the probe on the page and read its aria snapshot: path, language signals, numbered inventory, viewport."""
-        data = self.page.evaluate(self.probe)
+        with self.guard.active():
+            data = self.page.evaluate(self.probe)
         meta = data.get("page") or {}
         header = None
         try:
             header = self._response.headers.get("content-language") if self._response else None
         except Exception:
             pass
-        self.inventory = [{"ref": f"e{i}", **item} for i, item in enumerate(data.get("items") or [])]
+        self.inventory = clean_inventory([{**item, "ref": f"e{i}"} for i, item in enumerate(data.get("items") or [])
+                                          if isinstance(item, dict)])
         self.language = page_language(meta.get("lang"), meta.get("browser_lang"), header)
         try:
-            aria = self.page.locator("body").aria_snapshot()
+            with self.guard.active():
+                aria = redact_typed_values(self.page.locator("body").aria_snapshot())
         except Exception:
             aria = None
         view = meta.get("viewport") or {}
@@ -558,7 +796,9 @@ class LivePage:
         count = loc.count()
         if count != 1:
             return count, None
-        facts = (loc.evaluate(self.probe).get("items") or [None])[0]
+        with self.guard.active():
+            data = loc.evaluate(self.probe)
+        facts = (clean_inventory(data.get("items") or []) or [None])[0]
         return 1, (match_ref(self.inventory, facts) if facts else None)
 
 
@@ -622,7 +862,7 @@ class Healer:
             return None
         top = stack[0]
         text = line_of(self.root, top["file"], top["line"])
-        store = load_store(self.root / os.environ.get("HEAL_DIR", ".heal") / "fingerprints.json")
+        store = load_store(heal_dir(self.root) / "fingerprints.json")
         key = call_key(top["file"], text)
         lp = last_pass_for(store, key) if text else None
         if lp is None:
@@ -641,6 +881,8 @@ class Healer:
             return self._report(heal_id, {"count": None, "error": "no branch for the page's language"}), []
         if not cand.get("branches") and check_replacement(expression, cand["patch"]["from"]):
             return self._report(heal_id, {"count": None, "error": "the locator is not a safe expression"}), []
+        if not cand.get("branches") and _normal(cand["patch"]["to"]) != _normal(expression):
+            return self._report(heal_id, {"count": None, "error": "the patch is not the locator that was checked"}), []
         count, ref = live.check(expression)
         if count != 1 or ref != expected:                      # nothing has been edited yet
             report: Dict[str, Any] = {"count": count}
@@ -649,6 +891,7 @@ class Healer:
             return self._report(heal_id, report), []
         try:
             planned = plan_patches(cand, sent, self.settings.roots, self.root)
+            self._check_also_patches(cand, live, language, expected)
         except PatchRefused as e:
             report = {"count": 1, "hit": {"ref": ref}, "test_outcome": "error",
                       "error": f"patch refused by the client: {e.reason}"[:500]}
@@ -660,21 +903,39 @@ class Healer:
                 pass
             return {**resp, "status": "needs_human", "reason": "patch_refused",
                     "why": f"the client refused the patch: {e.reason}"}, []
-        write_files(self.root, planned)
         try:
+            write_files(self.root, planned)                    # inside the try: a partial multi-file write is reverted
             passed = bool(self.verify(failure))
             if not passed:
                 revert_files(self.root, planned)
             nxt = self._report(heal_id, {"count": 1, "hit": {"ref": ref},
                                          "test_outcome": "passed" if passed else "failed"})
         except BaseException:
-            revert_files(self.root, planned)                   # a verify crash or a lost service: never keep the edit
+            revert_files(self.root, planned)                   # a write or verify crash or a lost service: never keep the edit
             raise
         if passed and nxt.get("status") == "healed":
             return nxt, planned
         if passed:                                             # the service did not confirm it: do not keep it
             revert_files(self.root, planned)
         return nxt, []
+
+    @staticmethod
+    def _check_also_patches(cand: Dict[str, Any], live: Any, language: str, expected: Optional[str]) -> None:
+        """Every other expression the candidate writes is checked in the live page like the main one: it must match exactly
+        one element and be the expected one. Anything else refuses the whole candidate (nothing is written)."""
+        branches = cand.get("branches")
+        for p in cand.get("also_patches") or []:
+            if branches:
+                parsed = _branch_dict(p["to"])
+                expression = parsed[1].get(language) if parsed else None
+            else:
+                expression = p["to"]
+            if expression is None:
+                raise PatchRefused("an extra patch has no branch for the page's language")
+            count, ref = live.check(expression)
+            if count != 1 or ref != expected:
+                raise PatchRefused(f"an extra patch in {p.get('file')} does not match the one expected element "
+                                   f"({count} match(es))")
 
     def _report(self, heal_id: str, report: Dict[str, Any]) -> Dict[str, Any]:
         return self.service.result(heal_id, report)

@@ -96,7 +96,7 @@ class FakeService:
         return httpx.Response(200, json=self.replies.pop(0) if self.replies else reply("needs_human", reason="x", why="no more scripted replies"))
 
     def client(self, token=""):
-        return ServiceClient("http://svc", token, httpx.Client(transport=httpx.MockTransport(self.handler)))
+        return ServiceClient("https://svc", token, httpx.Client(transport=httpx.MockTransport(self.handler)))
 
     def posts(self, suffix):
         return [b for m, p, b, _ in self.requests if m == "POST" and p.endswith(suffix)]

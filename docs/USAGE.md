@@ -143,7 +143,11 @@ never committed by accident. Fingerprints change with app versions and viewport
 size, so keep `.heal/` as a CI cache from the last green run on the default branch
 rather than in git. **Opt in to committing it** with
 `HEAL_FINGERPRINTS_COMMIT=on` (the ignore file is then not created); expect churn.
-The probe script is fetched from the service once and cached as `.heal/probe.js`.
+The probe script is the vendored `utils/heal_probe.js`; it is never fetched and cached
+from the service (`HEAL_PROBE_FROM_SERVICE=1` uses the service's copy only when it is
+byte-identical). Fingerprints store element copy (text, labels, rows), which can hold
+personal data; set `HEAL_FINGERPRINT_COPY=off` to store hashes of the copy instead.
+`HEAL_DIR` and `HEAL_SOURCE_ROOTS` must be relative paths inside the repository.
 
 **Known limits:** the page is reopened at the failing route as first loaded, so an
 element that only appears after a click or login step may be missing from the

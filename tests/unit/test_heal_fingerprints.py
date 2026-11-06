@@ -40,7 +40,7 @@ def item(name="t", outcomes=("passed", "passed", "passed"), execution_count=1, f
 
 
 def recorder(tmp_path, **kw):
-    return fp.Recorder(root=Path(__file__).resolve().parents[2], env=kw.pop("env", {"HEAL_DIR": str(tmp_path)}),
+    return fp.Recorder(root=Path(__file__).resolve().parents[2], env=kw.pop("env", {"HEAL_DIR": "."}),
                        probe="(only) => 1", **kw)
 
 
@@ -158,11 +158,11 @@ class TestRecording:
         asyncio.run(r.record(Boom()))
         assert [v for v in r.pending.values() if v] == []
 
-    def test_no_probe_script_means_no_recording(self, tmp_path):
-        r = fp.Recorder(root=tmp_path, env={"HEAL_DIR": str(tmp_path), "HEAL_SERVICE_URL": ""})
-        r.start_test(item())
-        asyncio.run(r.record(FakeLocator()))
-        assert r.pending == {}
+    def test_the_probe_is_the_vendored_script_and_nothing_is_cached_from_a_service(self, tmp_path):
+        from utils.heal_client import vendored_probe
+        r = fp.Recorder(root=tmp_path, env={"HEAL_DIR": ".heal", "HEAL_SERVICE_URL": ""})
+        assert r.probe_script() == vendored_probe()
+        assert not (tmp_path / ".heal" / "probe.js").exists()
 
     def test_only_a_clean_green_test_writes(self, tmp_path):
         r = recorder(tmp_path)

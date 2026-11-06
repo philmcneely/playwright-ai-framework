@@ -41,6 +41,7 @@ Site: The Internet (https://the-internet.herokuapp.com)
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -56,7 +57,7 @@ from utils.heal_client import (  # noqa: E402
 )
 
 __all__ = ["run_pytest", "run_suite", "verify_passed", "validate_replacement", "working_tree_dirty", "heal_failures",
-           "write_summary", "main"]
+           "write_summary", "build_pr_body", "commit_lines", "md_escape", "main"]
 
 
 def run_pytest(keyword=None):
@@ -165,26 +166,63 @@ def print_decisions(decisions):
           f"{t['images']} image(s)")
 
 
+_MD_SPECIAL = set("\\`*_[]()<>#|!~@&{}")
+
+
+def one_line(value, limit=300):
+    """`value` as text on one line: control characters and line breaks become a space, capped (it came from the service)."""
+    text = "".join(" " if (ord(c) < 32 or ord(c) == 127 or 0x80 <= ord(c) < 0xA0 or c in "\u2028\u2029") else c
+                   for c in str(value if value is not None else ""))
+    return " ".join(text.split())[:limit]
+
+
+def md_escape(value, limit=300):
+    """`value` safe to put in a markdown line: one line, and every character that makes a link, an image, HTML, a heading,
+    a mention or emphasis is escaped (a service string cannot add a link or a section to a PR)."""
+    return "".join("&#64;" if c == "@" else "&lt;" if c == "<" else "&gt;" if c == ">" else "&amp;" if c == "&"
+                   else "\\" + c if c in _MD_SPECIAL else c for c in one_line(value, limit))
+
+
+def md_code(value, limit=300):
+    """`value` as an inline code span whose fence is longer than any backtick run inside it."""
+    text = one_line(value, limit)
+    runs = re.findall(r"`+", text)
+    if not runs:
+        return f"`{text}`"
+    fence = "`" * (max(len(r) for r in runs) + 1)
+    return f"{fence} {text} {fence}"
+
+
+def commit_lines(healed):
+    """One single-line entry per healed test for the commit body (no service text can start a new line or a trailer)."""
+    return [f"- {one_line(d['test'], 200)}: {one_line(d['from'], 200)} -> {one_line(d['to'], 200)}" for d in healed]
+
+
+def build_pr_body(healed, other):
+    """The PR description. Every string that came from the service or the test run is escaped."""
+    body = "Automated locator healing (out-of-band).\n\n## Healed (locators only, intent preserved)\n"
+    body += "\n".join(f"- **{md_escape(d['test'])}** -- {md_code(d['from'])} -> {md_code(d['to'])} "
+                      f"({md_escape(d.get('why') or d.get('source'))})" for d in healed)
+    if other:
+        body += "\n\n## Needs human review (not touched)\n" + "\n".join(
+            f"- **{md_escape(d['test'])}** -- {md_escape(d.get('why'))}" for d in other)
+    return body
+
+
 def open_pr(healed, other):
     """Branch, commit ONLY the healed files, push, and open one PR listing the decisions."""
     branch = f"heal/{time.strftime('%Y-%m-%d')}-{int(time.time()):x}"
     subprocess.check_call(["git", "checkout", "-b", branch])
-    body_lines = [f"- {d['test']}: {d['from']} -> {d['to']}" for d in healed]
     healed_files = sorted({f for d in healed for f in (d.get("files") or [d["file"]])})
     # Stage and commit ONLY the files this run healed.
     subprocess.check_call(["git", "add", "--", *healed_files])
     subprocess.check_call(["git", "commit", "-qm",
-                           f"fix(heal): update {len(healed)} drifted locator(s)\n\n" + "\n".join(body_lines),
+                           f"fix(heal): update {len(healed)} drifted locator(s)\n\n" + "\n".join(commit_lines(healed)),
                            "--", *healed_files])
     subprocess.check_call(["git", "push", "-q", "-u", "origin", branch])
-    pr_body = "Automated locator healing (out-of-band).\n\n## Healed (locators only, intent preserved)\n"
-    pr_body += "\n".join(f"- **{d['test']}** -- `{d['from']}` -> `{d['to']}` ({d.get('why') or d.get('source')})" for d in healed)
-    if other:
-        pr_body += "\n\n## Needs human review (not touched)\n" + "\n".join(
-            f"- **{d['test']}** -- {d.get('why')}" for d in other)
     subprocess.check_call(["gh", "pr", "create", "--base", "main", "--head", branch,
                            "--title", f"Locator healing -- {len(healed)} fixed, {len(other)} for review",
-                           "--body", pr_body])
+                           "--body", build_pr_body(healed, other)])
 
 
 def main():
