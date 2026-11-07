@@ -71,15 +71,17 @@ Author: PMAC
     }
     return ['', ''];
   };
-  // The copy of a node: its text nodes, with the subtrees of form controls, contenteditable regions and display:none
+  // The copy of a node: its text nodes, with the subtrees of form controls, contenteditable regions, text-entry roles and display:none
   // elements left out. Block boundaries read as a space, inline ones do not ("Sa<b>ve</b>" is "Save"). Bounded in
   // length and depth: it is the one place text is read from a page, so it is the one place a value could slip in.
+  // a text-entry widget by any token of its role (Playwright reads role as a token list): its text may be typed data
+  const ENTRY_ROLE = /(^|\s)(textbox|searchbox|combobox|spinbutton|slider)(?=\s|$)/i;
   const copy = (node, win, depth = 0) => {
     let out = '';
     for (const c of node.childNodes) {
       if (out.length > 400 || depth > 30) break;
       if (c.nodeType === 3) { out += c.nodeValue; continue; }
-      if (c.nodeType !== 1 || VALUE_TAGS.test(c.tagName) || c.isContentEditable) continue;
+      if (c.nodeType !== 1 || VALUE_TAGS.test(c.tagName) || c.isContentEditable || ENTRY_ROLE.test(c.getAttribute('role') || '')) continue;
       const d = win.getComputedStyle(c).display;
       if (d === 'none') continue;
       const inner = copy(c, win, depth + 1);
@@ -87,17 +89,22 @@ Author: PMAC
     }
     return out;
   };
-  const ownCopy = (el, win) => {
+  const ownCopy = (el, win, raw = false) => {
     if (VALUE_TAGS.test(el.tagName) && !(/^input$/i.test(el.tagName) && /^(button|submit|reset)$/i.test(el.type))) return '';
-    if (/^input$/i.test(el.tagName)) return clean(el.value).slice(0, 80);         // a button's label is its value
-    if (el.isContentEditable || /^(textbox|searchbox|combobox|spinbutton|slider)$/.test(el.getAttribute('role') || '')) return '';
+    if (/^input$/i.test(el.tagName)) {
+      const inputLabel = String(el.value || '');                  // a button / submit / reset input's label is its value
+      return raw ? inputLabel : clean(inputLabel).slice(0, 80);
+    }
+    if (el.isContentEditable || ENTRY_ROLE.test(el.getAttribute('role') || '')) return '';
     return clean(copy(el, win)).slice(0, 80);
   };
   // The text Playwright's has_text reads, so the service can prove a .filter(has_text=...) from the listing: text nodes and
-  // every descendant's text joined with no separator, hidden ones included, a button / submit input's label, open shadow
-  // roots; script, style and noscript skipped; whitespace collapsed as Playwright does. At most PW_CHARS; `pw_cut` when it
-  // is longer, too big to walk, or holds a textarea, a select or an editable region (their text can be typed or chosen
-  // data, so it is never read): the service then cannot say the text is NOT there.
+  // every descendant's text joined with no separator, hidden ones included, a button / submit / reset input's raw label,
+  // open shadow roots; HTML script, style and noscript skipped (Playwright's test is the upper-case name, so an SVG
+  // <style> is read); whitespace collapsed as Playwright does. At most PW_CHARS; `pw_cut` when it is longer, too big to
+  // walk, or holds a textarea, a select, an editable region or a text-entry widget role (their text can be typed or
+  // chosen data, so it is never read): the service then cannot say the text is NOT there. Hidden text is read because
+  // has_text reads it; a text holding a token-like run (24+ letters and digits) is not sent at all (pw_cut, empty).
   const PW_CHARS = 200, PW_NODES = 2000, PW_RAW = 2000;
   const pwText = (el, win) => {
     let raw = '', nodes = 0, cut = false;
@@ -106,14 +113,11 @@ Author: PMAC
       if (++nodes > PW_NODES || raw.length > PW_RAW) { cut = true; return; }
       if (n.nodeType === 3) { raw += n.nodeValue || ''; return; }
       if (n.nodeType === 1) {
-        if (/^(script|style|noscript)$/i.test(n.tagName)) return;
-        if (/^(textarea|select)$/i.test(n.tagName) || n.isContentEditable) { cut = true; return; }
+        if (n.tagName === 'SCRIPT' || n.tagName === 'STYLE' || n.tagName === 'NOSCRIPT') return;
+        if (/^(textarea|select)$/i.test(n.tagName) || n.isContentEditable
+            || ENTRY_ROLE.test(n.getAttribute('role') || '')) { cut = true; return; }
         if (/^input$/i.test(n.tagName)) {
-          if (/^(button|submit)$/i.test(n.type)) {
-            const label = ownCopy(n, win);
-            if (label.length >= 80) cut = true;
-            raw += label;
-          }
+          if (/^(button|submit|reset)$/i.test(n.type)) raw += ownCopy(n, win, true);
           return;
         }
       } else if (n.nodeType !== 11) {
@@ -123,7 +127,8 @@ Author: PMAC
       if (n.nodeType === 1 && n.shadowRoot) walk(n.shadowRoot);
     };
     walk(el);
-    const t = raw.trim().replace(/\u200b/g, '').replace(/\s+/g, ' ');
+    const t = raw.replace(/\u200b/g, '').trim().replace(/\s+/g, ' ');
+    if (t.split(' ').some(w => w.length >= 24 && /\d/.test(w) && /[A-Za-z]/.test(w))) return {pw_text: '', pw_cut: true};
     return {pw_text: t.slice(0, PW_CHARS), pw_cut: cut || t.length > PW_CHARS};
   };
   const describeOnly = only instanceof Element;      // called through locator.evaluate: just that element
