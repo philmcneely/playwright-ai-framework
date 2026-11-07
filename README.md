@@ -362,7 +362,9 @@ token usage and a run total, and writes `test_artifacts/heal-summary.json`.
 
 Optional: `HEAL_FINGERPRINTS=on` makes the test run record what each locator hit on
 a clean green run (`.heal/fingerprints.json`, git-ignored automatically), so the
-service can settle many heals with no model call. See
+service can settle many heals with no model call. CI keeps the file between runs
+with `actions/cache` (the chromium smoke job in `.github/workflows/smoke_full.yml`
+records it); committing it is opt-in with `HEAL_FINGERPRINTS_COMMIT=on`. See
 [docs/USAGE.md](docs/USAGE.md#path-2--the-heal-cli-headless-backed-by-the-heal-service)
 for settings, safety rules, language branches and fingerprints.
 
