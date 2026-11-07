@@ -334,32 +334,37 @@ Screenshot saved and attached to Allure: screenshots/tests_login_test_login.py_t
 
 You can see some example reports and attempts at fixing the files in `test_artifacts/ai/ai_healing_reports/`
 
-### Locator Healing CLI — out-of-band agent (v2)
+### Locator Healing CLI — out-of-band agent (v3, heal-service client)
 
-`scripts/heal.py` is the v2 out-of-band healer and the engine for the overnight
+`scripts/heal.py` is the out-of-band healer and the engine for the overnight
 heal→PR flow. Unlike the legacy in-run reporter above, it runs **after** the
-suite: it runs failing tests, reproduces each failure in a real browser to read
-the **live accessibility snapshot**, asks a configurable model for a resilient
-semantic locator, applies it, and **re-runs to verify**. It heals **locators
-only**, never assertions or intent; a failure it cannot make pass is reverted and
-flagged for a human (likely an app bug, not drift).
+suite: it runs failing tests, sends each failure's evidence to a **heal service**,
+checks the locator the service proposes in the live page (one match, the expected
+element), applies it, and **re-runs the exact test to verify**. It heals
+**locators only**, never assertions or intent; a failure it cannot make pass is
+reverted and flagged for a human (likely an app bug, not drift).
 
-The model is any **OpenAI-compatible** endpoint:
+This repository contains **no model URL, model name, prompt or reply parsing**:
+the service owns the model calls and the locator rules (test id > id > name > ...
+> text, language branches, same-element checks). Point the CLI at a service:
 
 ```bash
-# local or self-hosted endpoint (no key needed)
+# a heal service running on this machine
 BASE_URL=https://app.example.com \
-HEAL_BASE_URL=http://localhost:11434/v1 \
-HEAL_MODEL='your-model-name' \
+HEAL_SERVICE_URL=http://localhost:8765 \
 python scripts/heal.py -k login --open-pr
-
-# OpenRouter
-HEAL_BASE_URL=https://openrouter.ai/api/v1 HEAL_MODEL='...' HEAL_API_KEY=sk-... python scripts/heal.py
 ```
 
-Flags: `-k <name>` (scope to tests), `--max N` (cap failures handled), `--open-pr`
-(assemble one PR with the per-failure decisions and the untouched/for-human list).
-Run it nightly after the suite on a host with LAN access to the model and the app.
+Flags: `-k <name>` (scope to tests), `--max N` (cap failures handled; the rest are
+recorded as needs-human), `--open-pr` (assemble one PR with the per-failure
+decisions and the untouched/for-human list). It prints every decision with its
+token usage and a run total, and writes `test_artifacts/heal-summary.json`.
+
+Optional: `HEAL_FINGERPRINTS=on` makes the test run record what each locator hit on
+a clean green run (`.heal/fingerprints.json`, git-ignored automatically), so the
+service can settle many heals with no model call. See
+[docs/USAGE.md](docs/USAGE.md#path-2--the-heal-cli-headless-backed-by-the-heal-service)
+for settings, safety rules, language branches and fingerprints.
 
 
 ## 15. BrowserStack Integration

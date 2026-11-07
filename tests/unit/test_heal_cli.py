@@ -1,15 +1,18 @@
 """
 ===============================================================================
-Unit Tests: scripts/heal.py — selector extraction, source location, model-output
-validation, verification and revert-on-failure
+Unit Tests: scripts/heal.py — the CLI around the heal-service client: replacement
+validation, verification, decisions beyond --max, shared-fix confirmation, the
+summary file, the printed usage and the exit when no service is configured
 ===============================================================================
-No browser, model endpoint or real pytest subprocess is used; those seams are
-monkeypatched so the parsing and mutation decisions are tested in isolation.
+No browser, heal service or real pytest subprocess is used; those seams are
+replaced so the CLI's own decisions are tested in isolation. The client's
+request building, patch safety and try->result loop are in test_heal_client.py.
 
 Author: PMAC
 ===============================================================================
 """
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -22,41 +25,6 @@ heal = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(heal)
 
 ORIGINAL = "self.page.locator('#old')"
-
-
-class TestBrokenSelector:
-    def test_locator_literal(self):
-        assert heal.broken_selector_from("waiting for locator('#old')") == "#old"
-
-    def test_none_when_absent(self):
-        assert heal.broken_selector_from("AssertionError: x == y") is None
-
-
-class TestLocateInSource:
-    def _tree(self, tmp_path, files):
-        for rel, text in files.items():
-            f = tmp_path / rel
-            f.parent.mkdir(parents=True, exist_ok=True)
-            f.write_text(text)
-        return tmp_path
-
-    def test_finds_css_selector_with_regex_metacharacters(self, tmp_path):
-        sel = "button[type='submit']"
-        root = self._tree(tmp_path, {"pages/p.py": 'x = self.page.locator("button[type=\'submit\']")\n'})
-        loc = heal.locate_in_source(sel, root=root)
-        assert loc["call"] == 'self.page.locator("button[type=\'submit\']")'
-        assert loc["file"].replace("\\", "/") == "pages/p.py"
-
-    def test_not_found(self, tmp_path):
-        root = self._tree(tmp_path, {"pages/p.py": "x = 1\n"})
-        assert heal.locate_in_source("#nope", root=root) is None
-
-    def test_duplicate_locator_is_ambiguous(self, tmp_path):
-        root = self._tree(tmp_path, {
-            "pages/a.py": "self.page.locator('#old')\nself.page.locator('#old')\n",
-            "pages/b.py": "self.page.locator('#old')\n",
-        })
-        assert heal.locate_in_source("#old", root=root) == {"ambiguous": 3}
 
 
 class TestValidateReplacement:
@@ -86,14 +54,6 @@ class TestValidateReplacement:
         assert heal.validate_replacement("page.get_by_label('a')", ORIGINAL) is None
 
 
-def test_apply_replacement_touches_only_located_occurrence(tmp_path):
-    src = "a = self.page.locator('#old')\n# unrelated '#old' text\nb = other\n"
-    m = src.index("self.page.locator('#old')")
-    loc = {"src": src, "start": m, "end": m + len(ORIGINAL) + 0}
-    out = heal.apply_replacement(loc, "self.page.get_by_label('X')")
-    assert out.count("get_by_label") == 1 and "# unrelated '#old' text" in out
-
-
 class TestVerifyPassed:
     T = {"name": "test_a", "classname": "tests.t"}
 
@@ -119,44 +79,114 @@ class TestVerifyPassed:
         assert not heal.verify_passed(self.T, self._runner(0, [bad]))
 
 
-class TestMainFlow:
-    def _setup(self, tmp_path, monkeypatch, proposal, passes):
-        page = tmp_path / "pages" / "p.py"
-        page.parent.mkdir(parents=True)
-        page.write_text("class P:\n    def go(self):\n        self.page.locator('#old').click()\n")
+class FakeHealer:
+    """Stands in for utils.heal_client.Healer: one scripted decision per failure."""
+
+    def __init__(self, decisions):
+        self.decisions, self.seen = list(decisions), []
+
+    def heal(self, failure):
+        self.seen.append(failure["name"])
+        return {"test": failure["name"], **self.decisions.pop(0)}
+
+
+HEALED = {"outcome": "healed", "file": "pages/p.py", "from": "a", "to": "b", "files": ["pages/p.py"],
+          "usage": {"calls": 1, "input_tokens": 120, "output_tokens": 8, "images": 0}}
+HUMAN = {"outcome": "needs_human", "reason": "target_missing", "why": "no element could be the one",
+         "usage": {"calls": 0, "input_tokens": 0, "output_tokens": 0, "images": 0}}
+FAILS = [{"name": f"test_{i}", "classname": "tests.t", "error": "e"} for i in range(3)]
+
+
+class TestHealFailures:
+    def test_failures_beyond_max_are_recorded_not_dropped(self):
+        healer = FakeHealer([HUMAN])
+        out = heal.heal_failures(FAILS, healer, 1)
+        assert healer.seen == ["test_0"]
+        beyond = [d for d in out if d.get("reason") == "beyond_max"]
+        assert [d["test"] for d in beyond] == ["test_1", "test_2"] and "beyond --max 1" in beyond[0]["why"]
+        assert all(d["outcome"] == "needs_human" for d in beyond)
+
+    def test_a_test_a_previous_heal_already_fixed_is_confirmed_by_a_rerun_not_healed_again(self):
+        healer = FakeHealer([HEALED, HUMAN])
+        reruns = []
+        out = heal.heal_failures(FAILS, healer, 10, verify=lambda f: reruns.append(f["name"]) or f["name"] == "test_1")
+        assert reruns == ["test_1", "test_2"] and healer.seen == ["test_0", "test_2"]
+        assert out[1]["outcome"] == "healed" and "same fix as test_0" in out[1]["source"]
+        assert out[2]["outcome"] == "needs_human"
+
+
+class TestSummaryAndOutput:
+    def test_summary_file_has_counts_usage_and_every_decision(self, tmp_path):
+        ds = [{"test": "a", **HEALED}, {"test": "b", **HUMAN}, {"test": "c", "outcome": "not_drift", "why": "assertion"}]
+        path = heal.write_summary(ds, "t0", "run1", tmp_path / "art")
+        data = json.loads(path.read_text())
+        assert path.name == "heal-summary.json" and data["run_id"] == "run1"
+        assert data["counts"] == {"healed": 1, "needs_human": 1, "not_drift": 1}
+        assert data["usage"] == {"calls": 1, "input_tokens": 120, "output_tokens": 8, "images": 0}
+        assert [d["test"] for d in data["decisions"]] == ["a", "b", "c"] and data["failures"] == 3
+
+    def test_decisions_are_printed_with_tokens_and_a_run_total(self, capsys):
+        heal.print_decisions([{"test": "a", **HEALED}, {"test": "b", **HUMAN}])
+        out = capsys.readouterr().out
+        assert "[healed] a: pages/p.py: a -> b  (tokens 120 in / 8 out, 1 call(s))" in out
+        assert "[needs_human] [target_missing] b: no element could be the one" in out
+        assert "run total: 1 model call(s), 120 input / 8 output tokens, 0 image(s)" in out
+
+
+class TestMain:
+    def _env(self, monkeypatch, tmp_path, url="http://localhost:8765"):
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setattr(heal, "HEAL_BASE_URL", "http://x")
-        monkeypatch.setattr(heal, "HEAL_MODEL", "m")
+        monkeypatch.setenv("HEAL_ARTIFACTS_DIR", str(tmp_path / "art"))
+        monkeypatch.delenv("HEAL_VISION", raising=False)
+        (monkeypatch.setenv("HEAL_SERVICE_URL", url) if url else monkeypatch.delenv("HEAL_SERVICE_URL", raising=False))
         monkeypatch.setattr(sys, "argv", ["heal.py"])
-        monkeypatch.setattr(heal, "run_suite", lambda kw=None: [
-            {"name": "test_a", "classname": "tests.t", "error": "waiting for locator('#old')"}])
-        monkeypatch.setattr(heal, "aria_snapshot", lambda route: "- button")
-        monkeypatch.setattr(heal, "propose_replacement", lambda call, snap: proposal)
-        monkeypatch.setattr(heal, "verify_passed", lambda test: passes)
-        return page
 
-    def test_heals_when_verified(self, tmp_path, monkeypatch, capsys):
-        page = self._setup(tmp_path, monkeypatch, "self.page.get_by_role('button')", True)
-        heal.main()
-        assert "get_by_role('button')" in page.read_text()
-        assert "'healed'" in capsys.readouterr().out
+    def test_no_service_url_exits_2_with_a_message(self, tmp_path, monkeypatch, capsys):
+        self._env(monkeypatch, tmp_path, url=None)
+        with pytest.raises(SystemExit) as e:
+            heal.main()
+        assert e.value.code == 2 and "HEAL_SERVICE_URL" in capsys.readouterr().out
 
-    def test_reverts_when_not_verified(self, tmp_path, monkeypatch, capsys):
-        page = self._setup(tmp_path, monkeypatch, "self.page.get_by_role('button')", False)
-        before = page.read_text()
+    def test_no_failures_means_nothing_to_heal(self, tmp_path, monkeypatch, capsys):
+        self._env(monkeypatch, tmp_path)
+        monkeypatch.setattr(heal, "run_suite", lambda kw=None: [])
         heal.main()
-        assert page.read_text() == before
-        assert "reverted" in capsys.readouterr().out
+        assert "nothing to heal" in capsys.readouterr().out
 
-    def test_malicious_model_output_never_written(self, tmp_path, monkeypatch, capsys):
-        page = self._setup(tmp_path, monkeypatch, "__import__('os').system('id')", True)
-        before = page.read_text()
+    def test_full_run_prints_decisions_writes_the_summary_and_never_opens_a_pr_unasked(self, tmp_path, monkeypatch, capsys):
+        self._env(monkeypatch, tmp_path)
+        monkeypatch.setattr(heal, "run_suite", lambda kw=None: FAILS[:2])
+        fake = FakeHealer([HEALED, HUMAN])
+        monkeypatch.setattr(heal, "Healer", lambda *a, **k: fake)
+        monkeypatch.setattr(heal, "open_pr", lambda *a: pytest.fail("no --open-pr was given"))
         heal.main()
-        assert page.read_text() == before
-        assert "no usable" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "1 healed, 1 for human review" in out and "run total" in out
+        assert json.loads((tmp_path / "art" / "heal-summary.json").read_text())["counts"]["healed"] == 1
 
-    def test_failures_beyond_max_are_reported(self, tmp_path, monkeypatch, capsys):
-        self._setup(tmp_path, monkeypatch, "self.page.get_by_role('button')", True)
-        monkeypatch.setattr(sys, "argv", ["heal.py", "--max", "0"])
+    def test_vision_setting_is_accepted_but_nothing_is_captured(self, tmp_path, monkeypatch, capsys):
+        self._env(monkeypatch, tmp_path)
+        monkeypatch.setenv("HEAL_VISION", "auto")
+        monkeypatch.setattr(heal, "run_suite", lambda kw=None: [])
         heal.main()
-        assert "beyond --max" in capsys.readouterr().out
+        assert "sends no screenshot yet" in capsys.readouterr().out
+
+    def test_pytest_children_run_with_heal_run_set_so_fingerprints_are_not_recorded(self, monkeypatch):
+        seen = {}
+
+        def fake_run(cmd, env, capture_output):
+            seen.update(env)
+            raise FileNotFoundError
+
+        monkeypatch.setattr(heal.subprocess, "run", fake_run)
+        with pytest.raises(FileNotFoundError):
+            heal.run_pytest("x")
+        assert seen["HEAL_RUN"] == "1"
+
+    def test_no_model_settings_remain_in_the_script_or_client(self):
+        root = Path(__file__).resolve().parents[2]
+        text = " ".join((root / p).read_text() for p in ("scripts/heal.py", "utils/heal_client.py",
+                                                          "utils/heal_fingerprints.py", "utils/heal_locale.py"))
+        for banned in ("HEAL_BASE_URL", "HEAL_MODEL", "HEAL_API_KEY", "chat/completions", "propose_replacement",
+                       "max_tokens", "temperature"):
+            assert banned not in text, banned

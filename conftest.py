@@ -75,6 +75,7 @@ import asyncio
 from utils.ai_healing import get_ollama_service, find_page_object, ensure_ollama_ready
 from utils.browserstack import is_browserstack_enabled
 from utils.debug import debug_print
+from utils.heal_locale import track_language
 from playwright.async_api import async_playwright
 from utils.jira_client import get_jira_client, extract_ticket_id, JiraTestResult
 from utils.test_observability import (
@@ -97,6 +98,9 @@ from pathlib import Path
 from utils.api_capture import APICapture
 from utils.zap_integration import ZAPIntegration
 from utils.stability_index import record_result, get_unstable_tests
+
+# Records what each locator hit on a clean green run, for the heal service (off unless HEAL_FINGERPRINTS=on)
+pytest_plugins = ["utils.heal_fingerprints"]
 
 # Pytest fixtures (prevents auto-removal)
 pytest_fixtures = [
@@ -328,6 +332,7 @@ async def page(request):
             browser = await p.chromium.connect(ws_endpoint)
             context = await browser.new_context()
             page = await context.new_page()
+            track_language(page)  # lets healed by_language(...) locators read the page language
             print("\n Using BrowserStack cloud browser")
             api_capture = APICapture()
             page.on("request", api_capture.on_request)
@@ -359,6 +364,7 @@ async def page(request):
             if tracing_mode != "off":
                 await context.tracing.start(screenshots=True, snapshots=True, sources=True)
             page = await context.new_page()
+            track_language(page)  # lets healed by_language(...) locators read the page language
             print(f"\n Using {browser_name} browser (headless={headless})")
             api_capture = APICapture()
             page.on("request", api_capture.on_request)
