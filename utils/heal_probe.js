@@ -26,8 +26,13 @@ Features:
       contenteditable, summary, and the outermost element with a pointer cursor); plain containers are not
     ✓ testid is data-testid ONLY; data-test, data-qa and data-cy are separate keys (data_test, data_qa, data_cy), so the
       service can honour whichever attribute the client's Playwright config names as its test id attribute
-    ✓ Every other data-* attribute is listed as data_<name> (hyphens become underscores)
+    ✓ Every other data-* attribute is listed as data_<name> (hyphens become underscores) when its name is lower-case
+      letters, digits and hyphens (at most 60 after `data-`): a name with `_` could not be told from its hyphenated twin,
+      and any other name would be refused by the service's schema
     ✓ `name` is aria-label, else the element's own copy; `text` is the element's own copy; `disabled` and `hidden` flags
+    ✓ `pw_text` is the element's text as Playwright's has_text reads it (no separator between elements, hidden text
+      included, at most 200 characters) and `pw_cut` says it is incomplete (longer, too big, or holding a textarea, a
+      select or an editable region, whose text is never read)
     ✓ No ref: the service numbers the items (e0, e1, ...) in the order they come back
     ✓ At most MAX (500) items; `more` counts the ones left out, so the service knows the list is not complete
     ✓ `page`: path (no query or hash: they can carry tokens), lang, browser_lang, viewport, scroll, dpr
@@ -88,6 +93,39 @@ Author: PMAC
     if (el.isContentEditable || /^(textbox|searchbox|combobox|spinbutton|slider)$/.test(el.getAttribute('role') || '')) return '';
     return clean(copy(el, win)).slice(0, 80);
   };
+  // The text Playwright's has_text reads, so the service can prove a .filter(has_text=...) from the listing: text nodes and
+  // every descendant's text joined with no separator, hidden ones included, a button / submit input's label, open shadow
+  // roots; script, style and noscript skipped; whitespace collapsed as Playwright does. At most PW_CHARS; `pw_cut` when it
+  // is longer, too big to walk, or holds a textarea, a select or an editable region (their text can be typed or chosen
+  // data, so it is never read): the service then cannot say the text is NOT there.
+  const PW_CHARS = 200, PW_NODES = 2000, PW_RAW = 2000;
+  const pwText = (el, win) => {
+    let raw = '', nodes = 0, cut = false;
+    const walk = n => {
+      if (cut) return;
+      if (++nodes > PW_NODES || raw.length > PW_RAW) { cut = true; return; }
+      if (n.nodeType === 3) { raw += n.nodeValue || ''; return; }
+      if (n.nodeType === 1) {
+        if (/^(script|style|noscript)$/i.test(n.tagName)) return;
+        if (/^(textarea|select)$/i.test(n.tagName) || n.isContentEditable) { cut = true; return; }
+        if (/^input$/i.test(n.tagName)) {
+          if (/^(button|submit)$/i.test(n.type)) {
+            const label = ownCopy(n, win);
+            if (label.length >= 80) cut = true;
+            raw += label;
+          }
+          return;
+        }
+      } else if (n.nodeType !== 11) {
+        return;
+      }
+      for (let c = n.firstChild; c; c = c.nextSibling) walk(c);
+      if (n.nodeType === 1 && n.shadowRoot) walk(n.shadowRoot);
+    };
+    walk(el);
+    const t = raw.trim().replace(/\u200b/g, '').replace(/\s+/g, ' ');
+    return {pw_text: t.slice(0, PW_CHARS), pw_cut: cut || t.length > PW_CHARS};
+  };
   const describeOnly = only instanceof Element;      // called through locator.evaluate: just that element
   const queue = [{root: document, frame: '', shadow: [], ox: window.scrollX, oy: window.scrollY}];
   while (queue.length) {
@@ -128,7 +166,8 @@ Author: PMAC
         hidden, box: hidden || !(r.width > 0 && r.height > 0) ? null
           : {x: r.left + ox, y: r.top + oy, width: r.width, height: r.height}};
       for (const n of el.getAttributeNames()) {
-        if (n.startsWith('data-') && !['data-testid', 'data-test', 'data-qa', 'data-cy'].includes(n) && !SECRETISH.test(n)) {
+        // only names the key maps back to one way (no `_`: data-a_b and data-a-b would share data_a_b) and the service accepts
+        if (/^data-[a-z0-9-]{1,60}$/.test(n) && !['data-testid', 'data-test', 'data-qa', 'data-cy'].includes(n) && !SECRETISH.test(n)) {
           item['data_' + n.slice(5).replace(/-/g, '_')] = at(n).slice(0, 80);
         }
       }
@@ -147,6 +186,7 @@ Author: PMAC
       if (row) { item.row = row; item.row_attr = rowAttr; }
       if (frame) item.frame = frame;
       if (shadow.length) item.shadow = shadow.join(' >> ');
+      Object.assign(item, pwText(el, win));
       items.push(item);
     }
   }
