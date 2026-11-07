@@ -20,7 +20,8 @@ What it reads is attributes and visible copy, never what a person typed. That is
 Features:
     ✓ Open shadow roots and same-origin frames are walked too (a plain querySelectorAll stops at both); an item says
       where it is (shadow: the host tags, frame: the iframe's name or id) and which row it sits in (row: the nearest
-      ancestor with a test hook), so two "pending" badges can be told apart
+      ancestor with a test hook; row_attr: which attribute it is), so two "pending" badges can be told apart and a
+      locator can be scoped to the row
     ✓ Things a step acts on without being a control are listed too (an anchor with no href, onclick, tabindex,
       contenteditable, summary, and the outermost element with a pointer cursor); plain containers are not
     ✓ testid is data-testid ONLY; data-test, data-qa and data-cy are separate keys (data_test, data_qa, data_cy), so the
@@ -49,14 +50,21 @@ Author: PMAC
   const SECRETISH = /token|csrf|auth|session|secret|email|password/i;
   const VALUE_TAGS = /^(input|textarea|select|script|style|template|noscript)$/i;   // their content is a value or markup
   const hasData = el => el.getAttributeNames().some(n => n.startsWith('data-'));
-  const hook = el => el.getAttribute('data-qa') || el.getAttribute('data-testid') || el.getAttribute('data-test')
-    || el.getAttribute('data-cy') || el.id || '';
+  const HOOKS = ['data-qa', 'data-testid', 'data-test', 'data-cy', 'id'];
+  // [value, attribute] of the element's first hook in HOOKS order, or ['', '']
+  const hookOf = el => {
+    for (const a of HOOKS) {
+      const v = clean(a === 'id' ? el.id : el.getAttribute(a));
+      if (v) return [v, a];
+    }
+    return ['', ''];
+  };
   const rowOf = el => {
     for (let p = el.parentElement, n = 0; p && n < 100; p = p.parentElement, n++) {     // bounded: a page can clobber it
-      const h = clean(hook(p));
-      if (h) return h.slice(0, 80);
+      const [h, a] = hookOf(p);
+      if (h) return [h.slice(0, 80), a];
     }
-    return '';
+    return ['', ''];
   };
   // The copy of a node: its text nodes, with the subtrees of form controls, contenteditable regions and display:none
   // elements left out. Block boundaries read as a space, inline ones do not ("Sa<b>ve</b>" is "Save"). Bounded in
@@ -135,8 +143,8 @@ Author: PMAC
           item.top_at_center = !!hit && (hit === el || el.contains(hit));
         }
       }
-      const row = rowOf(el);
-      if (row) item.row = row;
+      const [row, rowAttr] = rowOf(el);
+      if (row) { item.row = row; item.row_attr = rowAttr; }
       if (frame) item.frame = frame;
       if (shadow.length) item.shadow = shadow.join(' >> ');
       items.push(item);
