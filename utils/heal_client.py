@@ -90,6 +90,9 @@ ALLOWED_LOCATOR_METHODS = {
 _LANG_KEY = re.compile(r"^[a-z]{2,3}$")
 # a CSS attribute selector that matches by prefix, suffix, substring, word or language (`[a^=x]`, `[a*=x]`, `[a$=x]`,
 # `[a~=x]`, `[a|=x]`) or reads an input's value (`[value=...]`, `[value]`): the service never writes one, so one is refused
+# a selector engine or chain that reaches past plain CSS: `xpath=`, an XPath starting `//` or `..`, `internal:` engines and `>>`
+# chains: the service never writes one
+_BAD_ENGINE = re.compile(r"^\s*(?:xpath\s*=|internal:|//|\.\.)|>>", re.I)
 _BAD_SELECTOR = re.compile(r"\[[^\]]*?[\^*$~|]=|\[\s*(?:default)?value\b", re.I)
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 _NETWORK_SCHEMES = {"http", "https", "ws", "wss"}
@@ -97,8 +100,40 @@ _BAD_CATEGORIES = {"Cc", "Cf", "Cs", "Zl", "Zp"}        # control, format (bidi)
 PROBE_FILE = Path(__file__).with_name("heal_probe.js")
 # The text of the page's contenteditable regions: Playwright prints it as plain `- text:` lines in the aria snapshot, so it is
 # read here only to be cut out of that snapshot (utils/heal_redact.scrub_texts); it is never sent.
-EDITABLE_TEXTS_JS = ("() => [...document.querySelectorAll('[contenteditable]')].filter(e => e.isContentEditable)"
-                     ".map(e => e.innerText || e.textContent || '').filter(Boolean).slice(0, 50)")
+EDITABLE_TEXTS_JS = """() => {
+  const out = [];
+  const walk = (root) => {
+    for (const el of root.querySelectorAll('*')) {
+      if (el.isContentEditable && el.getAttribute('contenteditable') !== null) out.push(el.innerText || el.textContent || '');
+      if (el.shadowRoot) walk(el.shadowRoot);              // open shadow roots; a closed one cannot be read by anyone
+    }
+  };
+  walk(document);
+  return out.filter(Boolean).slice(0, 50);
+}"""
+# every frame of the page is asked (Playwright can run it in a cross-origin frame too): iframes print into the aria snapshot
+
+
+def editable_texts(page: Any) -> List[str]:
+    """The text of the contenteditable regions of a sync page: its main frame, its iframes and their open shadow roots."""
+    out: List[str] = []
+    for frame in list(getattr(page, "frames", None) or [page])[:20]:
+        try:
+            out += [t for t in (frame.evaluate(EDITABLE_TEXTS_JS) or []) if isinstance(t, str)]
+        except Exception:
+            continue
+    return out
+
+
+async def editable_texts_async(page: Any) -> List[str]:
+    """editable_texts for an async page."""
+    out: List[str] = []
+    for frame in list(getattr(page, "frames", None) or [page])[:20]:
+        try:
+            out += [t for t in (await frame.evaluate(EDITABLE_TEXTS_JS) or []) if isinstance(t, str)]
+        except Exception:
+            continue
+    return out
 _TRACE_LINE = re.compile(r"^\s*(\S+?\.py):(\d+)\b", re.M)
 
 
@@ -334,8 +369,9 @@ def validate_replacement(proposed, original):
                     return None
             if isinstance(node.func, ast.Attribute) and node.func.attr == "locator":
                 for arg in node.args:
-                    if isinstance(arg.value, str) and _BAD_SELECTOR.search(arg.value):
+                    if isinstance(arg.value, str) and (_BAD_SELECTOR.search(arg.value) or _BAD_ENGINE.search(arg.value)):
                         return None
+
         elif not isinstance(node, (ast.Name, ast.Constant, ast.Load, ast.keyword)):
             return None
     return proposed
@@ -740,14 +776,12 @@ def _box_free(item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def match_ref(inventory: List[Dict[str, Any]], facts: Dict[str, Any]) -> Optional[str]:
-    """The inventory ref of the element the probe described in `facts`: an exact match on everything the probe listed, else
-    one that ignores box, frame and shadow. None when no entry or several entries fit (the hit cannot be named)."""
+    """The inventory ref of the element the probe described in `facts`: an exact match on everything the probe listed (box
+    included). None when no entry or several entries fit, so a near miss never names an element (the hit cannot be named
+    and the service learns nothing from it)."""
     plain = {k: v for k, v in facts.items() if k != "ref"}
     exact = [e["ref"] for e in inventory if {k: v for k, v in e.items() if k != "ref"} == plain]
-    if len(exact) == 1:
-        return exact[0]
-    loose = [e["ref"] for e in inventory if _box_free(e) == _box_free(facts)]
-    return loose[0] if len(loose) == 1 else None
+    return exact[0] if len(exact) == 1 else None
 
 
 def _origin(url: str) -> Tuple[str, str, int]:
@@ -835,9 +869,13 @@ class LivePage:
         self.inventory = clean_inventory([{**item, "ref": f"e{i}"} for i, item in enumerate(data.get("items") or [])
                                           if isinstance(item, dict)])
         self.language = page_language(meta.get("lang"), meta.get("browser_lang"), header)
+        try:                                     # the by_language helper reads the same Content-Language the client used
+            self.page._heal_content_language = header
+        except Exception:
+            pass
         try:
             with self.guard.active():
-                editable = self.page.evaluate(EDITABLE_TEXTS_JS)
+                editable = editable_texts(self.page)
                 aria = scrub_texts(redact_typed_values(self.page.locator("body").aria_snapshot()), editable)
         except Exception:
             aria = None
@@ -959,7 +997,7 @@ class Healer:
         if count != 1 or ref != expected:                      # nothing has been edited yet
             # a coarse count only: 0, 1 or 2 (meaning "more"), so the service cannot read how many elements a page holds
             report: Dict[str, Any] = {"count": None if count is None else min(count, 2)}
-            if ref:
+            if ref and ref in {i.get("ref") for i in (getattr(live, "inventory", None) or [])}:      # only an entry we sent
                 report["hit"] = {"ref": ref}
             return self._report(heal_id, report), []
         try:

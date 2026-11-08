@@ -13,6 +13,7 @@ Author: PMAC
 ===============================================================================
 """
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -425,3 +426,118 @@ def test_the_guard_lets_through_base_url_and_each_named_origin_and_nothing_wider
 def test_the_live_page_builds_its_guard_from_the_settings():
     live = hc.LivePage(HealSettings(base_url=BASE, allow_origins=("https://cdn.example",)), "/", "probe")
     assert hc._origin("https://cdn.example") in live.guard.allowed and live.guard.origin == hc._origin(BASE)
+
+
+# ---- N1: the oracle ---------------------------------------------------------------------------------------------------------
+def test_a_hit_is_named_only_when_it_is_an_entry_of_the_inventory_that_was_sent(tmp_path):
+    request, service, error = replay_setup("renamed_id_to_testid", tmp_path, [{"count": 1, "hit": {"ref": "e9"}}] * 2)
+    live = FakeLive(request, service)
+    healer = Healer(service, HealSettings(roots=("pages",), base_url="http://app.example"), lambda f: False, root=tmp_path,
+                    live_factory=lambda route, probe: live, run_id="r")
+    try:
+        healer.heal({"name": "t", "classname": "", "error": error})
+    except AssertionError:
+        pass
+    assert "hit" not in service.reports[0] and service.reports[0]["count"] == 1      # e9 is not in the three-entry inventory
+
+
+def test_a_near_miss_never_names_an_element():
+    inv = [{"ref": "e0", "tag": "input", "id": "a", "box": {"x": 1, "y": 2, "width": 3, "height": 4}}]
+    assert hc.match_ref(inv, {"tag": "input", "id": "a", "box": {"x": 1, "y": 2, "width": 3, "height": 5}}) is None
+    assert hc.match_ref(inv, {"tag": "input", "id": "a", "box": {"x": 1, "y": 2, "width": 3, "height": 4}}) == "e0"
+
+
+@pytest.mark.parametrize("to", [
+    "self.page.locator('xpath=//div')", "self.page.locator('XPATH = //div')", "self.page.locator('//div[@a]')",
+    "self.page.locator('../parent')", "self.page.locator('internal:text=\"x\"')", "self.page.locator('internal:role=button')",
+    "self.page.locator('div >> span')", "self.page.locator('#a>>#b')", "self.page.locator('css=a >> nth=0')",
+    "self.page.get_by_text(re.compile('x'))", "self.page.get_by_label(re.compile('x', re.I))",
+    "self.page.get_by_role('button', name=re.compile('x'))", "self.page.get_by_placeholder(re.compile('x'))",
+    "self.page.get_by_title(re.compile('x'))", "self.page.get_by_alt_text(re.compile('x'))",
+    "self.page.locator('#a').filter(has_text=re.compile('x'))", "self.page.get_by_text(compile('x'))"])
+def test_engines_chains_and_regex_are_refused(to):
+    assert check_replacement(to, FROM) is not None and hc.validate_replacement(to, FROM) is None
+
+
+@pytest.mark.parametrize("to", [
+    "self.page.locator('#a')", "self.page.locator('[data-qa=\"row-1\"]')", "self.page.locator('button.btn')",
+    "self.page.get_by_text('Save', exact=True)", "self.page.get_by_role('button', name='Save', exact=True)",
+    "self.page.get_by_test_id('a').filter(has_text='My row')", "self.page.get_by_label('a/b >> c', exact=True)"])
+def test_the_forms_the_service_writes_are_still_accepted(to):
+    assert check_replacement(to, FROM) is None
+
+
+def test_the_service_never_writes_the_refused_forms():
+    pytest.importorskip("heal_service")
+    import heal_service
+    root = Path(heal_service.__file__).parent
+    for name in ("locator_policy.py", "row_scope.py", "text_filter.py"):
+        text = (root / name).read_text(encoding="utf-8")
+        for needle in ('xpath=', 'internal:', 're.compile(', ' >> '):
+            written = [ln for ln in text.splitlines() if needle in ln and ("out.append" in ln or 'f"{base}' in ln or "return f" in ln)]
+            assert not written, (name, needle, written)
+
+
+# ---- (3): contenteditable in iframes and open shadow roots ---------------------------------------------------------------------
+def test_editable_text_is_collected_from_every_frame_and_the_script_walks_shadow_roots():
+    frames = [SimpleNamespace(evaluate=lambda js: ["main note"]), SimpleNamespace(evaluate=lambda js: ["frame note", 7]),
+              SimpleNamespace(evaluate=lambda js: (_ for _ in ()).throw(RuntimeError("detached")))]
+    assert hc.editable_texts(SimpleNamespace(frames=frames)) == ["main note", "frame note"]
+    assert "shadowRoot" in hc.EDITABLE_TEXTS_JS and "isContentEditable" in hc.EDITABLE_TEXTS_JS
+
+
+@pytest.mark.skipif(not _chromium(), reason="no Playwright Chromium build is installed")
+def test_in_a_real_browser_editable_text_in_an_iframe_and_a_shadow_root_does_not_survive():
+    from playwright.sync_api import sync_playwright
+    html = ('<body><div id="host"></div><iframe srcdoc="&lt;div contenteditable&gt;iframe secret&lt;/div&gt;"></iframe>'
+            '<button>Save</button><script>const r=document.getElementById("host").attachShadow({mode:"open"});'
+            'r.innerHTML="<div contenteditable>shadow secret</div>";</script></body>')
+    with sync_playwright() as p:
+        b = p.chromium.launch()
+        page = b.new_page()
+        page.set_content(html)
+        page.wait_for_timeout(300)
+        raw = page.locator("body").aria_snapshot()
+        found = hc.editable_texts(page)
+        live = hc.LivePage(HealSettings(), "/", hc.vendored_probe())
+        live.page, live._response = page, None
+        aria = live.snapshot()["aria"]
+        b.close()
+    assert {"iframe secret", "shadow secret"} <= {t.strip() for t in found}, (found, raw)
+    for secret in ("iframe secret", "shadow secret"):
+        assert secret not in aria
+    assert "Save" in aria
+
+
+# ---- N2: the helper and the client pick the same language ---------------------------------------------------------------------
+class SyncPage:
+    """A sync page whose <html> has no lang: only the browser locale (and a Content-Language header) can say."""
+
+    def __init__(self, locale="fr-CA"):
+        self.locale = locale
+
+    def evaluate(self, js):
+        return ["", self.locale]
+
+
+@pytest.mark.parametrize("locale,header,want", [("fr-CA", None, "fr"), ("", "de", "de"), ("", None, ""), ("en-US", "fr", "en")])
+def test_with_no_html_lang_the_helper_and_the_client_agree_on_the_language(locale, header, want):
+    from utils.heal_locale import by_language, page_language
+    client_says = page_language("", locale, header)
+    page = SyncPage(locale)
+    page._heal_content_language = header                 # what LivePage.snapshot() records from the response header
+    branches = {"en": "EN", "fr": "FR", "de": "DE"}
+    assert client_says == want
+    assert by_language(page, branches) == (branches[want] if want in branches else "EN")
+
+
+def test_the_live_page_records_the_content_language_the_helper_reads(tmp_path):
+    page = SimpleNamespace(url=BASE + "/", evaluate=lambda js: {"page": {"lang": "", "browser_lang": ""}, "items": [], "more": 0},
+                           locator=lambda sel: SimpleNamespace(aria_snapshot=lambda: ""), frames=[])
+    live = hc.LivePage(HealSettings(base_url=BASE), "/", "probe")
+    live.page, live._response = page, SimpleNamespace(headers={"content-language": "fr"})
+    live.snapshot()
+    assert live.language == "fr" and page._heal_content_language == "fr"
+    from utils.heal_locale import by_language
+    page.evaluate = lambda js: ["", ""]
+    assert by_language(page, {"en": "EN", "fr": "FR"}) == "FR"        # the helper reaches the same branch the client checked

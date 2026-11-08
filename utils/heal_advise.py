@@ -50,8 +50,8 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
 
 from config.artifact_paths import AI_HEALING_REPORT_DIR
-from utils.heal_client import (EDITABLE_TEXTS_JS, HealServiceError, HealSettings, build_request, collect_source, last_pass_of,
-                               run_total, stack_from_error, vendored_probe)
+from utils.heal_client import (HealServiceError, HealSettings, build_request, collect_source, editable_texts_async,
+                               last_pass_of, run_total, stack_from_error, vendored_probe)
 from utils.heal_redact import clean_inventory, redact_typed_values, scrub_texts
 
 _ON = {"on", "1", "true", "yes"}
@@ -96,7 +96,7 @@ async def snapshot_page(page: Any, probe: Optional[str] = None) -> Dict[str, Any
     inventory = clean_inventory([{**item, "ref": f"e{i}"} for i, item in enumerate(data.get("items") or [])
                                  if isinstance(item, dict)])
     try:
-        editable = await page.evaluate(EDITABLE_TEXTS_JS)        # read only to be cut out of the snapshot, never sent
+        editable = await editable_texts_async(page)        # read only to be cut out of the snapshot, never sent
         aria = scrub_texts(redact_typed_values(await page.locator("body").aria_snapshot()), editable)
     except Exception:
         aria = None

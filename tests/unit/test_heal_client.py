@@ -258,7 +258,7 @@ class TestLoop:
         assert d["outcome"] == "needs_human" and d["reason"] == "no_candidate_left"
 
     def test_wrong_element_edits_nothing_and_names_the_hit(self, project):
-        live = FakeLive({TO: (1, "e5")})
+        live = FakeLive({TO: (1, "e5")}, inventory=[{"ref": "e0", "tag": "input"}, {"ref": "e5", "tag": "input"}])
         svc = FakeService(reply("try", candidate(project)), reply("needs_human", reason="max_rounds"))
         verify = Verify()
         healer(project, svc, verify, live).heal(FAILURE)
@@ -527,8 +527,9 @@ class TestMatchRef:
     def test_exact_match(self):
         assert match_ref(self.INV, {"tag": "input", "id": "b", "box": self.INV[1]["box"]}) == "e1"
 
-    def test_ignores_box_and_frame_when_no_exact_match(self):
-        assert match_ref(self.INV, {"tag": "input", "id": "b", "frame": "f", "box": None}) == "e1"
+    def test_a_near_miss_that_differs_in_box_or_frame_names_nothing(self):
+        assert match_ref(self.INV, {"tag": "input", "id": "b", "frame": "f", "box": None}) is None
+        assert match_ref(self.INV, {"tag": "input", "id": "b", "box": {"x": 9, "y": 2, "width": 3, "height": 4}}) == "e1"
 
     def test_ambiguous_or_unknown_is_none(self):
         twin = self.INV + [{"ref": "e2", "tag": "input", "id": "b", "box": None}]
