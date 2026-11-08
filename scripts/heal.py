@@ -29,7 +29,8 @@ Environment Variables:
     HEAL_SERVICE_URL: the heal service (required)
     HEAL_SERVICE_TOKEN: bearer token, when the service needs one
     HEAL_STORAGE_STATE: Playwright storage-state file, so the page is opened as a signed-in user (never sent)
-    HEAL_VISION / HEAL_MASK: accepted; screenshots are not captured by this client yet (vision is off)
+    HEAL_VISION: off (default) | auto | on; auto and on send one masked viewport screenshot per failure (see utils/heal_client.py)
+    HEAL_MASK: comma separated CSS selectors blacked out in that screenshot, besides every password input
     HEAL_TEST_ID_ATTRIBUTE: the project's test id attribute (default data-testid)
     HEAL_ARTIFACTS_DIR: where heal-summary.json goes (default test_artifacts)
     BASE_URL: the app under test
@@ -53,7 +54,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # `python scripts/heal.py` puts scripts/ first, not the repo
 
 from utils.heal_client import (  # noqa: E402
-    HealSettings, Healer, ServiceClient, run_total, validate_replacement,
+    HealSettings, Healer, ServiceClient, run_total, validate_replacement, vision_mode,
 )
 
 __all__ = ["run_pytest", "run_suite", "verify_passed", "validate_replacement", "working_tree_dirty", "heal_failures",
@@ -235,8 +236,11 @@ def main():
     ap.add_argument("--open-pr", action="store_true")
     ap.add_argument("--max", type=int, default=10)
     args = ap.parse_args()
-    if settings.vision != "off":
-        print(f"[heal] HEAL_VISION={settings.vision}: this client sends no screenshot yet, running with vision off.")
+    if vision_mode(settings) != "off":
+        print(f"[heal] HEAL_VISION={settings.vision}: one masked viewport screenshot is sent per failure "
+              "(password inputs and HEAL_MASK selectors are blacked out).")
+    elif settings.vision != "off":
+        print(f"[heal] HEAL_VISION={settings.vision!r} is not off, auto or on: running with vision off, no screenshot is taken.")
 
     if args.open_pr and working_tree_dirty():
         print("[heal] --open-pr needs a clean working tree (tracked files have local changes); "
