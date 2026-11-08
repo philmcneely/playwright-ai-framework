@@ -279,3 +279,28 @@ def test_a_field_that_was_a_password_is_masked_editable_text_is_gone_and_no_attr
             live.__exit__()
     finally:
         server.shutdown()
+
+
+# ---- 6: language: the Python helper and the Python client agree where there is no <html lang> -------------------------------
+@pytest.mark.parametrize("html,locale,want", [
+    ("<html><body><button>x</button></body></html>", "fr-FR", "fr"),        # no <html lang>: the browser locale decides
+    ("<html><body><button>x</button></body></html>", "en-US", "en"),
+    ('<html lang="de"><body><button>x</button></body></html>', "fr-FR", "de"),   # <html lang> wins over the locale
+])
+def test_the_helper_and_the_client_pick_the_same_language_on_a_page_without_html_lang(html, locale, want):
+    from utils.heal_locale import by_language
+    p, b = _browser()
+    if b is None:
+        pytest.skip("no Playwright Chromium build is installed")
+    try:
+        page = b.new_context(locale=locale).new_page()
+        page.set_content(html)
+        lp = hc.LivePage(hc.HealSettings(), "/", hc.PROBE_FILE.read_text(encoding="utf-8"))
+        lp.page = page
+        lp.snapshot()
+        branches = {"xx": "FIRST", "en": "EN", "fr": "FR", "de": "DE"}
+        assert lp.language == want
+        assert by_language(page, branches) == branches[want]
+    finally:
+        b.close()
+        p.stop()
