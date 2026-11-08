@@ -95,7 +95,7 @@ def test_the_pr_url_is_read_from_what_gh_printed():
 def test_an_open_pr_is_reported_open_and_stays_tracked(root):
     recorded(root)
     sent, service = state(root, "open")
-    assert service.sent == [("h_abc123", {"pr_state": "open", "failed_again": False, "runs_since": 0, "days_since": 3})]
+    assert service.sent == [("h_abc123", {"pr_state": "open", "failed_again": False, "runs_since": 0, "days_since": 3, "repo": ""})]
     assert sent[0]["pr_state"] == "open" and hf.load(root, {})[0]["done"] is False
 
 
@@ -139,7 +139,7 @@ def test_runs_and_days_since_count_and_a_failure_again_sticks(root):
     state(root, cases=[{"name": "test_login", "outcome": "failed"}], now=NOW + 2 * DAY)
     _, service = state(root, cases=[{"name": "test_login", "outcome": "passed"}, {"name": "other", "outcome": "failed"}],
                        now=NOW + 5 * DAY + 100)
-    assert service.sent[0][1] == {"pr_state": "merged_unchanged", "failed_again": True, "runs_since": 3, "days_since": 5}
+    assert {k: v for k, v in service.sent[0][1].items() if k not in ("repo", "run_id")} == {"pr_state": "merged_unchanged", "failed_again": True, "runs_since": 3, "days_since": 5}
 
 
 def test_a_skipped_or_missing_test_is_not_a_run(root):

@@ -15,6 +15,13 @@ Features:
       "double" with \" inside). Nested typed children go too: everything under a textbox or searchbox bar `- /property`
       lines, `text` and `/value` under the other value roles, and block-scalar continuations. /placeholder and combobox
       options stay. Linear time: one pass over the lines, every scan bounded by the line
+    ✓ A link's `/url:` line loses its query and fragment (a reset or session token rides there), and the name of a
+      `[selected]` option goes (it is what a person chose in a select)
+    ✓ scrub_texts(yaml_text, texts): removes each given text from the snapshot; used with the text of the page's
+      contenteditable regions, which Playwright prints as plain `- text:` lines that no role rule can tell from prose
+    ✓ redact_failure_text(error): the failure text cut to what the service's triage reads (the failing locator, the call log's
+      wait lines, the assertion labels, `resolved to <element>`), so no `Received:` / `Expected:` / `Actual` value, no
+      `--showlocals` block, no element HTML and no source line of a code frame (a `fill("#pw", "hunter2")`) leaves
     ✓ clean_inventory(items): the probe's element inventory cut to an allowlist of keys; any key named value or
       defaultValue (any case, any prefix) is dropped, so a probe that learned to read input values cannot carry them out
     ✓ Nothing here talks to the network or the browser: plain functions over plain data
@@ -118,6 +125,30 @@ def _entry(line: str) -> Optional[Tuple[int, int, str, int, bool]]:
     return indent, start, role, end, rest.startswith(":") and bool(rest[1:].strip())
 
 
+def _cut_url(line: str) -> str:
+    """A `- /url: value` line without the query and fragment of its value (a quoted value keeps its quotes)."""
+    head, sep, value = line.partition(":")
+    value = value.strip()
+    quote = value[:1] if value[:1] in "'\"" else ""
+    cut = min([i for i in (value.find("?"), value.find("#")) if i >= 0], default=-1)
+    if cut < 0:
+        return line
+    return f"{head}: {value[:cut]}{quote}"
+
+
+def _selected_option(bare: str, ent: Tuple[int, int, str, int, bool]) -> str:
+    """An `option "name" [selected]` line without its name: the chosen option of a select is what a person picked."""
+    indent, start, role, end, _ = ent
+    key = bare[start:end]
+    j = len(role)
+    if role != "option" or key[j:j + 2] != ' "':
+        return bare
+    k = _quoted_end(key, j + 1)
+    if k < 0 or "[selected" not in key[k:]:
+        return bare
+    return bare[:start] + key[:j] + key[k:] + bare[end:]
+
+
 def _is_property(line: str) -> bool:
     return line.lstrip(" ").startswith("- /")
 
@@ -155,8 +186,55 @@ def redact_typed_values(yaml_text: str) -> str:
             # Cut at the key: the inline value and its colon go, and the dash is normalised to "- " so every
             # redacted line has one shape whatever the spacing it arrived with.
             line = " " * ent[0] + "- " + bare[ent[1]:ent[3]] + line[len(bare):]
+        elif ent is not None and ent[2] == "option":
+            line = _selected_option(bare, ent) + line[len(bare):]
+        elif bare.lstrip(" ").startswith("- /url:"):
+            line = _cut_url(bare) + line[len(bare):]
         out.append(line)
     return "".join(out)
+
+
+def scrub_texts(yaml_text: str, texts: Any, minimum: int = 3) -> str:
+    """`yaml_text` with every occurrence of each text in `texts` removed (texts shorter than `minimum` characters are left,
+    because removing them would eat the snapshot). For the text of contenteditable regions."""
+    out = yaml_text
+    for t in sorted({str(x).strip() for x in (texts if isinstance(texts, (list, tuple)) else [])} - {""}, key=len, reverse=True):
+        for piece in {t, *[ln.strip() for ln in t.splitlines()]}:
+            if len(piece) >= minimum:
+                out = out.replace(piece, "")
+    return out
+
+
+# What the service's triage reads of a failure (see the service's triage.py / failing.py): the locator Playwright prints after
+# `waiting for` or `strict mode violation:`, the call log's state waits, `locator resolved to <`, `element(s) not found`, and
+# the assertion LABELS (`Expected string`, `Received value`, `unexpected value`) that tell a wrong value from a missing element.
+_KEEP_LINE = re.compile(r"waiting for |strict mode violation|Timeout \d+ms exceeded|element\(s\) not found|Call log:|locator resolved to <|"
+                        r"unexpected value|(?:Expected|Received) (?:substring|string|pattern|value)\b")
+_RESOLVED = re.compile(r"(locator resolved to )<.*", re.S)
+_LABEL = re.compile(r"(?:Expected|Received) (?:substring|string|pattern|value)\b|unexpected value")
+_LINE_MAX = 2000
+
+
+def redact_failure_text(error: str) -> str:
+    """The failure text reduced to the lines the service's triage reads, each cut where a value would start: an assertion line
+    keeps its label (`Expected string:`) and loses what follows, a `locator resolved to <...>` keeps `<element>`, the numbered
+    element HTML of a strict-mode violation goes, and every other line (source lines of a code frame, `--showlocals`
+    variables, `Actual value:`, exception messages) is dropped. A heal still tells not drift from drift, and finds the call."""
+    out: List[str] = []
+    for line in (error or "").splitlines():
+        line = line[:_LINE_MAX]
+        if not _KEEP_LINE.search(line):
+            continue
+        if line.lstrip().startswith(">") or re.match(r"^\s*\d+\) <", line):          # a code-frame source line, an element listing
+            continue
+        m = _RESOLVED.search(line)
+        if m:
+            line = line[:m.start()] + m.group(1) + "<element>"
+        elif _LABEL.search(line) and "waiting for " not in line:
+            first = _LABEL.search(line)
+            line = line[:first.end()] + ":"
+        out.append(line)
+    return "\n".join(out) + ("\n" if out else "")
 
 
 def _clean_item(item: Any) -> Optional[Dict[str, Any]]:
@@ -187,4 +265,4 @@ def clean_inventory(items: Any) -> List[Dict[str, Any]]:
     return [c for c in (_clean_item(i) for i in (items if isinstance(items, list) else [])) if c is not None]
 
 
-__all__ = ["INVENTORY_KEYS", "clean_inventory", "redact_typed_values"]
+__all__ = ["INVENTORY_KEYS", "clean_inventory", "redact_failure_text", "redact_typed_values", "scrub_texts"]

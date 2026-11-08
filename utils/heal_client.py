@@ -67,13 +67,13 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
 from utils.heal_fingerprints import (call_key, heal_dir, last_pass_for, line_of, load_store, relative_under, source_roots)
 from utils.heal_locale import page_language
-from utils.heal_redact import clean_inventory, redact_typed_values
+from utils.heal_redact import clean_inventory, redact_failure_text, redact_typed_values, scrub_texts
 
 LIMITS = {"files": 20, "file_bytes": 256 * 1024, "aria_chars": 256 * 1024}
 HELPER = "by_language"
@@ -86,10 +86,17 @@ ALLOWED_LOCATOR_METHODS = {
     "get_by_test_id", "get_by_alt_text", "get_by_title", "first", "last", "nth", "filter",
 }
 _LANG_KEY = re.compile(r"^[a-z]{2,3}$")
+# a CSS attribute selector that matches by prefix, suffix, substring, word or language (`[a^=x]`, `[a*=x]`, `[a$=x]`,
+# `[a~=x]`, `[a|=x]`) or reads an input's value (`[value=...]`, `[value]`): the service never writes one, so one is refused
+_BAD_SELECTOR = re.compile(r"\[[^\]]*?[\^*$~|]=|\[\s*(?:default)?value\b", re.I)
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 _NETWORK_SCHEMES = {"http", "https", "ws", "wss"}
-_BAD_CATEGORIES = {"Cc", "Cf", "Zl", "Zp"}              # control, format (bidi), line and paragraph separators
+_BAD_CATEGORIES = {"Cc", "Cf", "Cs", "Zl", "Zp"}        # control, format (bidi), lone surrogate, line and paragraph separators
 PROBE_FILE = Path(__file__).with_name("heal_probe.js")
+# The text of the page's contenteditable regions: Playwright prints it as plain `- text:` lines in the aria snapshot, so it is
+# read here only to be cut out of that snapshot (utils/heal_redact.scrub_texts); it is never sent.
+EDITABLE_TEXTS_JS = ("() => [...document.querySelectorAll('[contenteditable]')].filter(e => e.isContentEditable)"
+                     ".map(e => e.innerText || e.textContent || '').filter(Boolean).slice(0, 50)")
 _TRACE_LINE = re.compile(r"^\s*(\S+?\.py):(\d+)\b", re.M)
 
 
@@ -152,7 +159,8 @@ class ServiceClient:
             raise HealServiceError("refusing to send the bearer token over http:// to a host other than localhost "
                                    "(use https://, or set HEAL_ALLOW_INSECURE=1)")
         try:
-            resp = self.http.request(method, self.base + path, headers=self.headers,
+            headers = {**self.headers, "Content-Type": "application/json"} if method == "POST" else self.headers
+            resp = self.http.request(method, self.base + path, headers=headers,
                                      content=json.dumps(body).encode() if body is not None else None)
         except httpx.HTTPError as e:
             raise HealServiceError(f"the heal service could not be reached ({type(e).__name__})") from None
@@ -205,7 +213,7 @@ class ServiceClient:
 # ---- the locator validator (a second check on everything the service sends) -------------------------------------------
 def _has_control(text: str) -> bool:
     """True when `text` holds a control character (a carriage return, form feed, tab, NUL, C1), a bidi or other format
-    character, or a line or paragraph separator: anything that can hide or end a line differently from how it reads."""
+    character, a lone surrogate (it cannot be written as UTF-8), or a line or paragraph separator: anything that can hide or end a line differently from how it reads."""
     return any(unicodedata.category(c) in _BAD_CATEGORIES for c in text)
 
 
@@ -298,6 +306,10 @@ def validate_replacement(proposed, original):
             for arg in [*node.args, *(k.value for k in node.keywords)]:
                 if not isinstance(arg, ast.Constant):
                     return None
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "locator":
+                for arg in node.args:
+                    if isinstance(arg.value, str) and _BAD_SELECTOR.search(arg.value):
+                        return None
         elif not isinstance(node, (ast.Name, ast.Constant, ast.Load, ast.keyword)):
             return None
     return proposed
@@ -471,6 +483,18 @@ def collect_source(stack: List[Dict[str, Any]], roots: Tuple[str, ...], root: Pa
     return files
 
 
+def safe_route(route: Any, base_url: str) -> str:
+    """`route` when it is a path on BASE_URL's own origin: one leading slash, no scheme, no `//`, no backslash, no control
+    character, and a URL that resolves (joined onto BASE_URL) to BASE_URL's origin. Anything else is a ValueError: the route
+    comes from a cache file or the source, and must never send the browser (with its storage state) to another site."""
+    if not isinstance(route, str) or not route.startswith("/") or route.startswith("//") or "\\" in route or _has_control(route) \
+            or len(route) > 2000:
+        raise ValueError("the page route is not a plain path on the app under test")
+    if _origin(urljoin(base_url.rstrip("/") + "/", route)) != _origin(base_url):
+        raise ValueError("the page route leaves the app under test")
+    return route
+
+
 def route_from_source(content: str) -> str:
     """The page route a page object's `self.url = f"{BASE_URL}/path"` names; "/" when it names none."""
     m = re.search(r'self\.url\s*=\s*f?["\'][^"\']*BASE_URL\}?([^"\']*)["\']', content)
@@ -488,12 +512,14 @@ def build_request(failure: Dict[str, Any], files: List[Dict[str, str]], stack: L
                   settings: HealSettings, root: Path, last_pass: Optional[Dict[str, Any]] = None,
                   run_id: Optional[str] = None, mode: str = "heal") -> Dict[str, Any]:
     """The POST /v1/heal body. `page` is a LivePage snapshot: path, language signals, inventory, aria, viewport.
-    No screenshot is ever included (vision is off), and no input value: the inventory comes from the probe. `mode` "advise"
+    No screenshot is ever included (vision is off), and no input value: the inventory comes from the probe, and the failure
+    text is cut to the lines the service's triage reads (utils/heal_redact.redact_failure_text), so no assertion value, local
+    variable, element HTML or source line of a code frame travels. `mode` "advise"
     asks for the decision and the best locator with no patch (utils/heal_advise.py)."""
     req: Dict[str, Any] = {
         "client": {"framework": "playwright-ai-framework", "language": "python", "version": client_version(root)},
         "test": {"id": junit_test_id(failure.get("classname", ""), failure["name"], root), "title": failure["name"][:500]},
-        "failure": {"error": (failure.get("error") or "")[:100_000], "stack": stack},
+        "failure": {"error": redact_failure_text((failure.get("error") or "")[:100_000]), "stack": stack},
         "source": {"roots": list(settings.roots), "files": files},
         "page": {"url": page["path"], "language": page["language"], "inventory": page["inventory"],
                  "inventory_more": page["more"], "viewport": page["viewport"], "screenshot": None},
@@ -709,19 +735,20 @@ def _origin(url: str) -> Tuple[str, str, int]:
 
 
 class OriginGuard:
-    """Playwright route handler: while `probing` is True, a request to an origin other than BASE_URL's is aborted, so the
-    probe (or anything a page wires to run while it is evaluated) cannot send what it reads to another site. Outside a
-    probe every request goes through untouched."""
+    """Playwright route handler: a request to an origin other than BASE_URL's is aborted for the whole session, the first
+    navigation included, so neither the page nor the probe nor anything a page wires up can send what it reads to another
+    site. (A page's third-party scripts and fonts are therefore not loaded during a heal; the inventory is of the page's own
+    content.) `active()` is kept for callers that wrap a probe in it: the guard no longer depends on it."""
 
     def __init__(self, base_url: str):
         self.origin = _origin(base_url)
-        self.probing = False
+        self.probing = True
 
     def handle(self, route: Any, request: Any = None) -> None:
         url = (request or route.request).url
         foreign = urlsplit(url).scheme.lower() in _NETWORK_SCHEMES and _origin(url) != self.origin
         try:
-            if self.probing and foreign:
+            if foreign:
                 route.abort()
             else:
                 route.continue_()
@@ -730,11 +757,7 @@ class OriginGuard:
 
     @contextmanager
     def active(self) -> Iterator[None]:
-        self.probing = True
-        try:
-            yield
-        finally:
-            self.probing = False
+        yield
 
 
 class LivePage:
@@ -754,7 +777,7 @@ class LivePage:
         try:
             self._browser = self._p.chromium.launch()
             ctx = self._browser.new_context(
-                base_url=self.settings.base_url,
+                base_url=self.settings.base_url, service_workers="block",       # a service worker would answer outside the guard
                 **({"storage_state": self.settings.storage_state} if self.settings.storage_state else {}))
             ctx.route("**/*", self.guard.handle)
             self.page = ctx.new_page()
@@ -787,7 +810,8 @@ class LivePage:
         self.language = page_language(meta.get("lang"), meta.get("browser_lang"), header)
         try:
             with self.guard.active():
-                aria = redact_typed_values(self.page.locator("body").aria_snapshot())
+                editable = self.page.evaluate(EDITABLE_TEXTS_JS)
+                aria = scrub_texts(redact_typed_values(self.page.locator("body").aria_snapshot()), editable)
         except Exception:
             aria = None
         view = meta.get("viewport") or {}
@@ -869,13 +893,19 @@ class Healer:
         route = last_pass.pop("_page") if last_pass else None
         if route is None:
             route = route_from_source(files[0]["content"]) if files else "/"
+        route = safe_route(route, self.settings.base_url)
         probe = self.service.probe_js()
         kept: List[PlannedFile] = []
         with self.live_factory(route, probe) as live:
             snap = live.snapshot()
             request = build_request(failure, files, stack, snap, self.settings, self.root, last_pass, self.run_id)
             resp = self.service.heal(request)
+            rounds = 0
             while resp.get("status") == "try" and resp.get("candidate"):
+                if rounds >= request["options"]["max_rounds"]:        # the service asked for more than the client allowed
+                    return {**self._decision(resp, []), "outcome": "needs_human", "reason": "max_rounds",
+                            "why": f"the service offered more than {rounds} candidates; the client stops at its own limit"}
+                rounds += 1
                 resp, kept = self._try(failure, resp, live, sent, live.language)
                 if kept:
                     break
@@ -900,7 +930,8 @@ class Healer:
             return self._report(heal_id, {"count": None, "error": "the patch is not the locator that was checked"}), []
         count, ref = live.check(expression)
         if count != 1 or ref != expected:                      # nothing has been edited yet
-            report: Dict[str, Any] = {"count": count}
+            # a coarse count only: 0, 1 or 2 (meaning "more"), so the service cannot read how many elements a page holds
+            report: Dict[str, Any] = {"count": None if count is None else min(count, 2)}
             if ref:
                 report["hit"] = {"ref": ref}
             return self._report(heal_id, report), []

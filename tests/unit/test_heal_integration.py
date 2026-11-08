@@ -106,7 +106,7 @@ def make_service():
                            Endpoint(base_url="http://localhost:11434/v1", model="test-model") if model else None)
         http = TestClient(create_app(core))
         opened.append(http)
-        return ServiceClient("http://testserver", "", http), core
+        return ServiceClient("http://127.0.0.1", "", http), core
     yield build
     for client in opened:
         client.close()
@@ -127,7 +127,7 @@ def project(tmp_path, source=PAGE_PY):
 
 
 def healer(root, base_url, client, verify=lambda test: True):
-    return Healer(client, HealSettings(url="http://testserver", base_url=base_url), verify, root=root, run_id="it1")
+    return Healer(client, HealSettings(url="http://127.0.0.1", base_url=base_url), verify, root=root, run_id="it1")
 
 
 def test_fingerprint_heal_rewrites_the_locator_with_no_model_call(tmp_path, site, service):

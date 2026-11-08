@@ -288,7 +288,7 @@ def main():
     if args.open_pr and healed:
         pr_url = open_pr(healed, other)
         try:
-            if pr_url and record_heals(Path.cwd(), healed, pr_url):
+            if pr_url and record_heals(Path.cwd(), healed, pr_url, run_id=run_id):
                 print("[heal] recorded the healed locators for follow-up in .heal/heals.json")
         except Exception as e:                           # bookkeeping: the PR is already open
             print(f"[heal] could not record the heals for follow-up ({type(e).__name__})")

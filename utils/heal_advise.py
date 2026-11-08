@@ -50,9 +50,9 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
 
 from config.artifact_paths import AI_HEALING_REPORT_DIR
-from utils.heal_client import (HealServiceError, HealSettings, build_request, collect_source, last_pass_of, run_total,
-                               stack_from_error, vendored_probe)
-from utils.heal_redact import clean_inventory, redact_typed_values
+from utils.heal_client import (EDITABLE_TEXTS_JS, HealServiceError, HealSettings, build_request, collect_source, last_pass_of,
+                               run_total, stack_from_error, vendored_probe)
+from utils.heal_redact import clean_inventory, redact_typed_values, scrub_texts
 
 _ON = {"on", "1", "true", "yes"}
 _STATUS = {"advised": "advised", "needs_human": "needs_human", "not_drift": "not_drift"}
@@ -96,7 +96,8 @@ async def snapshot_page(page: Any, probe: Optional[str] = None) -> Dict[str, Any
     inventory = clean_inventory([{**item, "ref": f"e{i}"} for i, item in enumerate(data.get("items") or [])
                                  if isinstance(item, dict)])
     try:
-        aria = redact_typed_values(await page.locator("body").aria_snapshot())
+        editable = await page.evaluate(EDITABLE_TEXTS_JS)        # read only to be cut out of the snapshot, never sent
+        aria = scrub_texts(redact_typed_values(await page.locator("body").aria_snapshot()), editable)
     except Exception:
         aria = None
     view = meta.get("viewport") or {}
@@ -112,7 +113,7 @@ def _clean(value: Any, limit: int = 600, one_line: bool = True) -> str:
     capped. One line unless `one_line` is False (then newlines survive)."""
     text = str(value if value is not None else "")
     keep = "" if one_line else "\n"
-    out = "".join(c if (c in keep or unicodedata.category(c) not in {"Cc", "Cf", "Zl", "Zp"}) else " " for c in text)
+    out = "".join(c if (c in keep or unicodedata.category(c) not in {"Cc", "Cf", "Cs", "Zl", "Zp"}) else " " for c in text)
     return (" ".join(out.split()) if one_line else out)[:limit]
 
 
@@ -184,32 +185,42 @@ def _fence(text: str) -> str:
     return f"{fence}\n{text}\n{fence}"
 
 
+def _span(text: Any) -> str:
+    """Untrusted text as an inline code span: its fence is longer than any backtick run inside it, so it cannot close the span,
+    start a link, a heading or a mention."""
+    text = _clean(text, 1000)
+    runs = re.findall(r"`+", text)
+    fence = "`" * (max((len(r) for r in runs), default=0) + 1)
+    return f"{fence} {text} {fence}" if text else "``"
+
+
 def report_text(decision: Dict[str, Any], context: Dict[str, Any]) -> str:
     """The markdown report of one decision. `context` holds test_name, url (path only), error_message and the timestamp."""
     adv = decision.get("advice") or {}
     lines = [
         "# Heal Service Advice Report", "",
         "## Test Information",
-        f"- **Test Name**: `{_clean(context.get('test_name'), 200).replace('`', '')}`",
-        f"- **Timestamp**: `{context.get('timestamp', '')}`",
-        f"- **Page Path**: `{_clean(context.get('path'), 200).replace('`', '')}`",
-        f"- **Heal Id**: `{decision.get('heal_id') or 'none'}`", "",
+        f"- **Test Name**: {_span(context.get('test_name'))}",
+        f"- **Timestamp**: {_span(context.get('timestamp', ''))}",
+        f"- **Page Path**: {_span(context.get('path'))}",
+        f"- **Heal Id**: {_span(decision.get('heal_id') or 'none')}", "",
         "## Error Details", _fence(_clean(context.get("error_message"), 2000, one_line=False)), "",
-        "## Decision", f"- **Outcome**: {decision['outcome']}"]
+        "## Decision", f"- **Outcome**: {_span(decision['outcome'])}"]
     if decision.get("reason"):
-        lines.append(f"- **Reason**: {decision['reason']}")
+        lines.append(f"- **Reason**: {_span(decision['reason'])}")
     if decision.get("why"):
-        lines.append(f"- **Why**: {decision['why']}")
+        lines.append(f"- **Why**: {_span(decision['why'])}")
     if adv:
-        lines += ["", "## Advised Locator", _fence(adv["code"]), f"- **Strategy**: {adv['strategy']}",
-                  f"- **Tier**: {adv['tier']} ({adv['tier_movement']} from the broken locator)" +
+        lines += ["", "## Advised Locator", _fence(adv["code"]), f"- **Strategy**: {_span(adv['strategy'])}",
+                  f"- **Tier**: {_span(adv['tier'])} ({_span(adv['tier_movement'])} from the broken locator)" +
                   (", below the broken locator's tier because nothing higher is unique" if adv["below_floor"] else ""),
-                  f"- **Why**: {adv['why']}"]
+                  f"- **Why**: {_span(adv['why'])}",
+                  "- **Checked against the live page**: no. Check count 1 and the right element before using it."]
         if adv["alternatives"]:
             lines += ["", "### Other locators for the same element"] + [_fence(a) for a in adv["alternatives"]]
     u = decision["usage"]
     lines += ["", "## Usage", f"{u['calls']} model call(s), {u['input_tokens']} input / {u['output_tokens']} output tokens, "
-              f"settled at step {decision.get('settled_at') or 'n/a'}", "",
+              f"settled at step {_span(decision.get('settled_at') or 'n/a')}", "",
               "---", "*Advice only: nothing in the repository was edited. Generated by the heal service.*", ""]
     return "\n".join(lines)
 

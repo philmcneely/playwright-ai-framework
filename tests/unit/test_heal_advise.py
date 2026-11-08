@@ -184,7 +184,7 @@ def test_the_report_names_the_decision_the_locator_and_that_nothing_was_edited(p
     d = ha.advise(FakeService(), HealSettings(), project, FAILURE, snap())
     text = ha.report_text(d, {"test_name": "test_login", "path": "/login", "error_message": ERROR, "timestamp": "20260101_000000"})
     assert "self.page.get_by_test_id(\"login-user\")" in text and "h_abc" in text and "nothing in the repository was edited" in text
-    assert "up from the broken locator" in text and "self.page.locator(\"#user\")" in text and "100 input / 8 output" in text
+    assert "` up ` from the broken locator" in text and "Checked against the live page**: no" in text and "self.page.locator(\"#user\")" in text and "100 input / 8 output" in text
 
 
 def test_the_summary_counts_outcomes_and_tokens_and_is_written_atomically(project, tmp_path):
@@ -289,7 +289,7 @@ def test_with_the_real_service_an_advise_request_gets_advice_and_edits_nothing(p
             m = re.search(r"^(e\d+) \|.*Username", prompt, re.M)
             return CallResult('{"ref": "%s", "why": "the username box"}' % m.group(1), "", Usage(100, 8), 5, True)
     core = HealSession(ServiceSettings(), Store(":memory:", 14), Model(), Endpoint(base_url="http://localhost:11434/v1", model="m"))
-    client = ServiceClient("http://testserver", "", TestClient(create_app(core)))
+    client = ServiceClient("http://127.0.0.1", "", TestClient(create_app(core)))
     before = (project / "pages" / "login_page.py").read_text()
     d = ha.advise(client, HealSettings(), project, FAILURE, snap(), "run-it")
     assert d["outcome"] == "advised" and "get_by_test_id" in d["advice"]["code"] and d["usage"]["calls"] == 1
