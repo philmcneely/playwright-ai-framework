@@ -362,9 +362,11 @@ token usage and a run total, and writes `test_artifacts/heal-summary.json`.
 
 Optional: `HEAL_VISION=auto|on` also sends one masked viewport screenshot of the failing page,
 which the service may show to a vision model (`auto`: only when the text pick fails or is a
-close call; default `off`: no screenshot is taken and no image byte leaves). Password inputs and
-the CSS selectors in `HEAL_MASK` are blacked out before sending, and a capture that cannot be
-masked is not sent at all.
+close call; default `off`: no screenshot is taken and no image byte leaves). Password, card and
+one-time-code fields, fields with a secret-like name or id, cross-origin frames and the CSS
+selectors in `HEAL_MASK` (separated by newlines or `;;`) are blacked out before sending, and a
+capture that cannot be masked is not sent at all. The screenshot shows whatever the page shows:
+list anything else sensitive in `HEAL_MASK`.
 
 Optional: `HEAL_FINGERPRINTS=on` makes the test run record what each locator hit on
 a clean green run (`.heal/fingerprints.json`, git-ignored automatically), so the

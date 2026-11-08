@@ -107,14 +107,21 @@ the page is opened as a signed-in user (the file stays on this machine).
 | `HEAL_STORAGE_STATE` | storage-state file for pages behind login |
 | `HEAL_ARTIFACTS_DIR` | where `heal-summary.json` goes (default `test_artifacts`) |
 | `HEAL_VISION` | `off` (default), `auto` or `on`: whether to send one screenshot of the failing page (see *Vision* below) |
-| `HEAL_MASK` | comma separated CSS selectors to black out in that screenshot, besides every password input |
+| `HEAL_MASK` | CSS selectors to black out in that screenshot, separated by newlines or `;;` (not commas: a selector may contain one), on top of the default masks below |
 
 **Vision.** With `HEAL_VISION=off` the client never asks the browser for a
 screenshot and the request carries `screenshot: null`: no image byte leaves the
 machine. With `auto` or `on` it takes **one viewport screenshot** (never the full
 page: a late scroll restore can move the page under a click) of the same page the
-inventory came from, with a black box over every password input and every
-`HEAL_MASK` selector, and sends it with the viewport size and scroll offset. If the
+inventory came from, with a black box over the **default masks** (password inputs;
+fields with `autocomplete` `cc-*`, `one-time-code`, `current-password` or
+`new-password`; fields whose `name` or `id` contains `pass`, `pwd`, `token`,
+`secret`, `ssn`, `card`, `cvv` or `otp`, which also covers a password field a
+script turned into plain text if it kept such a name; every cross-origin or
+sandboxed frame, whole) and every `HEAL_MASK` selector (separate several with a
+newline or `;;`), and sends it with the viewport size and scroll offset. **The
+screenshot shows whatever the page shows**: anything sensitive that is not
+covered by a default mask must be listed in `HEAL_MASK`. If the
 capture or the masking fails, nothing is sent (never an unmasked picture). What the
 service does with it is the service's decision: `auto` uses it only when the text
 pick fails or is a close call, `on` for every heal (for testing and evaluation),

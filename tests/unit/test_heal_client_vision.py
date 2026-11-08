@@ -129,16 +129,22 @@ class TestWireForm:
 
 # ---- the capture itself, with a fake Playwright page --------------------------------------------------------------------
 class FakeLocator:
-    def __init__(self, owner, selector):
-        self.owner, self.selector = owner, selector
+    def __init__(self, owner, selector, cross=()):
+        self.owner, self.selector, self.cross = owner, selector, cross
+
+    def evaluate_all(self, script):
+        return [i in self.cross for i in range(max([-1, *self.cross]) + 1)]
+
+    def nth(self, i):
+        return FakeLocator(self.owner, f"{self.selector}:nth({i})")
 
 
 class FakeFrame:
-    def __init__(self, name):
-        self.name = name
+    def __init__(self, name, cross=()):
+        self.name, self.cross = name, cross
 
     def locator(self, selector):
-        return FakeLocator(self.name, selector)
+        return FakeLocator(self.name, selector, self.cross if selector.startswith("iframe") else ())
 
 
 class FakePage(FakeFrame):
@@ -147,8 +153,12 @@ class FakePage(FakeFrame):
     def __init__(self, fail=None):
         super().__init__("main")
         self.main_frame = self
+        self.cross = ()
         self.frames = [self, FakeFrame("child-1"), FakeFrame("child-2")]
         self.calls, self.fail = [], fail
+
+    def locator(self, selector):
+        return FakeLocator(self.name, selector, self.cross if selector.startswith("iframe") else ())
 
     def screenshot(self, **kw):
         self.calls.append(kw)
@@ -171,9 +181,31 @@ class TestCapture:
         assert "full_page" not in kw and kw["type"] == "png" and kw["mask_color"] == "#000000"
         assert kw["animations"] == "disabled" and kw["caret"] == "hide"
         picked = [(m.owner, m.selector) for m in kw["mask"]]
-        assert ("main", "input[type=password]") in picked and ("child-1", "input[type=password]") in picked
-        assert ("child-2", "input[type=password]") in picked
+        for owner in ("main", "child-1", "child-2"):
+            (default,) = [s for o, s in picked if o == owner and "type=password" in s]
+            for must in ('input[autocomplete*="cc-" i]', 'autocomplete*="one-time-code"', 'autocomplete*="current-password"',
+                         'autocomplete*="new-password"', 'input[name*="pass" i]', 'input[id*="pwd" i]', 'input[name*="token" i]',
+                         'input[name*="secret" i]', 'input[id*="ssn" i]', 'input[name*="card" i]', 'input[name*="cvv" i]',
+                         'input[name*="otp" i]'):
+                assert must in default, (owner, must)
         assert ("main", "#card-number") in picked and ("main", ".ssn, .dob") in picked
+
+    def test_every_cross_origin_frame_element_is_masked_whole(self):
+        page = FakePage()
+        page.cross = (0, 2)
+        lp = live_page(page=page)
+        assert lp.screenshot() is not None
+        (kw,) = page.calls
+        owners = [(m.owner, m.selector) for m in kw["mask"] if "nth" in m.selector]
+        assert [s.split(":nth")[1] for o, s in owners if o == "main"] == ["(0)", "(2)"]
+
+    def test_a_frame_check_that_fails_sends_nothing(self):
+        page = FakePage()
+
+        def boom(script):
+            raise RuntimeError("detached")
+        page.locator = lambda s: type("L", (), {"evaluate_all": staticmethod(boom)})()
+        assert live_page(page=page).screenshot() is None and page.calls == []
 
     def test_off_never_calls_playwright(self):
         lp = live_page(vision="off")
@@ -235,6 +267,47 @@ def test_a_real_screenshot_has_the_password_field_and_the_mask_locator_blacked_o
         page.evaluate("window.scrollTo(0, 50)")
         again = lp.screenshot()
         assert (again["width"], again["height"]) == (400, 300)
+    finally:
+        b.close()
+        p.stop()
+
+
+MASK_PAGE = """<!doctype html><html><body style="margin:0;background:#fff">
+<input id="pw" type="password" style="position:absolute;left:10px;top:10px;width:150px;height:30px;background:#f00;border:0">
+<input id="cc" autocomplete="cc-number" style="position:absolute;left:10px;top:50px;width:150px;height:30px;background:#f00;border:0">
+<input id="ssn" name="ssn" style="position:absolute;left:10px;top:90px;width:150px;height:30px;background:#f00;border:0">
+<input id="card_number" style="position:absolute;left:10px;top:130px;width:150px;height:30px;background:#f00;border:0">
+<input id="otp" autocomplete="one-time-code" style="position:absolute;left:10px;top:170px;width:150px;height:30px;background:#f00;border:0">
+<input id="pwd2" name="pwd2" type="text" style="position:absolute;left:10px;top:210px;width:150px;height:30px;background:#f00;border:0">
+<input id="plain" name="nick" style="position:absolute;left:10px;top:250px;width:150px;height:30px;background:#00f;border:0">
+<iframe id="x" src="http://other.test/f.html" style="position:absolute;left:200px;top:10px;width:150px;height:100px;border:0"></iframe>
+<iframe id="same" srcdoc="<body style='margin:0'><input type=password style='width:140px;height:30px;background:#f00;border:0'>"
+  style="position:absolute;left:200px;top:130px;width:150px;height:100px;border:0"></iframe>
+</body></html>"""
+FRAME = "<!doctype html><body style='margin:0;background:#f00'>card 4242 4242 4242 4242</body>"
+
+
+def test_the_default_masks_cover_card_otp_secret_named_and_cross_origin_fields_in_a_real_browser():
+    pytest.importorskip("PIL", reason="Pillow is not installed")
+    p, b = _browser()
+    if b is None:
+        pytest.skip("no Playwright Chromium build is installed")
+    try:
+        page = b.new_page(viewport={"width": 400, "height": 300})
+        page.route("http://app.test/**", lambda r: r.fulfill(body=MASK_PAGE, content_type="text/html"))
+        page.route("http://other.test/**", lambda r: r.fulfill(body=FRAME, content_type="text/html"))
+        page.goto("http://app.test/")
+        page.wait_for_timeout(300)
+        lp = LivePage(HealSettings(vision="auto"), "/", "probe")
+        lp.page = page
+        shot = lp.screenshot()
+        assert shot is not None
+        data = base64.b64decode(shot["data"])
+        for name, xy in (("password", (60, 25)), ("cc-", (60, 65)), ("ssn", (60, 105)), ("card id", (60, 145)),
+                         ("otp", (60, 185)), ("pwd name", (60, 225)), ("cross-origin frame", (270, 60)),
+                         ("password in a same-origin frame", (230, 145))):
+            assert pixel(data, *xy) == (0, 0, 0), name
+        assert pixel(data, 60, 265) == (0, 0, 255)                   # an ordinary field is left as it is
     finally:
         b.close()
         p.stop()

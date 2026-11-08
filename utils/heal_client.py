@@ -7,8 +7,8 @@ files and the framework's own safety checks, and nothing about models: no model 
 of a model reply live in this repository. The service picks the element and writes the locator; this client only
     - builds the request: the stack files under the source roots (capped, with sha256), the probe's element inventory of the
       reopened failing route, the aria snapshot, the language signals, the last green run's fingerprint and its neighbours
-    - with HEAL_VISION auto or on, takes ONE viewport screenshot of that same page (never full page) with password inputs and
-      the HEAL_MASK locators blacked out, and sends it with the viewport and scroll it was taken in; with off it never takes
+    - with HEAL_VISION auto or on, takes ONE viewport screenshot of that same page (never full page) with the default masks
+      (password, card, one-time-code and secret-named fields, cross-origin frames) and the HEAL_MASK locators blacked out, and sends it with the viewport and scroll it was taken in; with off it never takes
       one and sends null
     - checks every candidate in the live page BEFORE touching a file: the locator must match exactly one element and that
       element must be the one the service expects (the probe's `only` mode describes it; no code from the service is ever
@@ -22,7 +22,8 @@ Features:
     ✓ HealSettings: HEAL_SERVICE_URL, HEAL_SERVICE_TOKEN, HEAL_VISION (off | auto | on), HEAL_MASK, HEAL_TEST_ID_ATTRIBUTE,
       HEAL_SOURCE_ROOTS, HEAL_STORAGE_STATE, BASE_URL
     ✓ Vision capture (LivePage.screenshot): off never calls Playwright's screenshot and the request carries `screenshot: null`,
-      so no image byte leaves; auto and on take one viewport PNG with `mask` on every password input and every HEAL_MASK
+      so no image byte leaves; auto and on take one viewport PNG with `mask` on the defaults (password, card, one-time-code and secret-named fields, cross-origin
+      frames) and every HEAL_MASK
       locator (black boxes), animations frozen and the caret hidden. The capture fails closed: any error while masking or
       capturing, a file that is not a PNG or is over the service's 4 MB limit means no screenshot is sent, never an unmasked one.
       The request then says `vision: off`
@@ -50,8 +51,10 @@ Environment Variables:
     HEAL_VISION: off | auto | on (default off). auto and on send one masked viewport screenshot; the service decides whether a
         model ever sees it (auto: only when its text pick fails or is a close call; on: every heal) and only a service
         configured to allow images sends it to a model. Anything else than auto or on is off
-    HEAL_MASK: comma separated CSS selectors (the same strings you would pass to page.locator) blacked out in the screenshot,
-        in addition to every password input
+    HEAL_MASK: CSS selectors (the strings you would pass to page.locator, so a comma inside one is fine) separated by newlines
+        or `;;`, blacked out in the screenshot in addition to the defaults: password inputs, card and one-time-code fields
+        (autocomplete), fields whose name or id contains pass, pwd, token, secret, ssn, card, cvv or otp, and every
+        cross-origin or sandboxed frame. The screenshot shows whatever the page shows: mask anything else sensitive
     HEAL_TEST_ID_ATTRIBUTE: the project's test id attribute (default data-testid)
     HEAL_SOURCE_ROOTS: comma separated source roots, relative paths inside the repository (default pages,tests,utils)
     HEAL_PROBE_FROM_SERVICE: "1" to fetch the probe from the service (used only when it is byte-identical to the vendored one)
@@ -94,6 +97,25 @@ VISION_MODES = ("auto", "on")                       # HEAL_VISION values that ta
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 MASK_COLOR = "#000000"
 PASSWORD_INPUT = "input[type=password]"
+# Fields blacked out in every screenshot whatever HEAL_MASK says: passwords, card and one-time-code fields by autocomplete, and any
+# field whose name or id says it holds a secret (this also covers a password field a script turned into type=text, as long as it
+# kept a password-like name: the client cannot see what a field *used to be*).
+SECRET_TERMS = ("pass", "pwd", "token", "secret", "ssn", "card", "cvv", "otp")
+DEFAULT_MASK = ", ".join(
+    [PASSWORD_INPUT, 'input[autocomplete*="cc-" i]', 'input[autocomplete*="one-time-code" i]',
+     'input[autocomplete*="current-password" i]', 'input[autocomplete*="new-password" i]']
+    + [f'{tag}[{attr}*="{term}" i]' for term in SECRET_TERMS for attr in ("name", "id") for tag in ("input", "textarea")])
+FRAME_SELECTOR = "iframe, frame, embed, object"
+# which of a frame's embedded documents are another origin (or an opaque sandbox): they are masked whole
+_CROSS_ORIGIN_JS = """els => els.map(e => {
+  try {
+    const src = e.getAttribute('src') || e.getAttribute('data') || '';
+    const sandbox = e.getAttribute('sandbox');
+    if (sandbox !== null && !/allow-same-origin/.test(sandbox)) return true;
+    if (!src || /^(about:|javascript:)/i.test(src)) return false;
+    return new URL(src, location.href).origin !== location.origin;
+  } catch (_) { return true; }
+})"""
 HELPER = "by_language"
 HELPER_IMPORT = "from utils.heal_locale import by_language"
 
@@ -130,7 +152,7 @@ class HealSettings:
         attr = env.get("HEAL_TEST_ID_ATTRIBUTE", "data-testid").strip().lower()
         return cls(url=env.get("HEAL_SERVICE_URL", "").strip().rstrip("/"), token=env.get("HEAL_SERVICE_TOKEN", "").strip(),
                    vision=env.get("HEAL_VISION", "off").strip().lower() or "off",
-                   mask=[m.strip() for m in env.get("HEAL_MASK", "").split(",") if m.strip()],
+                   mask=[m.strip() for m in re.split(r"\n|;;", env.get("HEAL_MASK", "")) if m.strip()],
                    test_id_attribute=attr if re.fullmatch(r"[a-z][a-z0-9-]{0,63}", attr) else "data-testid",
                    roots=source_roots(env), storage_state=env.get("HEAL_STORAGE_STATE") or None,
                    base_url=env.get("BASE_URL", "http://localhost:7080"))
@@ -837,14 +859,19 @@ class LivePage:
 
     def screenshot(self) -> Optional[Dict[str, Any]]:
         """ONE viewport screenshot in wire form, or None. With HEAL_VISION off Playwright is never asked for one. Otherwise the
-        shot is the viewport only (never full_page: a late scroll restore shifts the page), with a black box over every
-        password input (the page's frames too) and over every HEAL_MASK locator, animations frozen and the caret hidden. Any
-        failure, including a mask that cannot be resolved, returns None: an unmasked screenshot is never the fallback."""
+        shot is the viewport only (never full_page: a late scroll restore shifts the page), with a black box over DEFAULT_MASK
+        in the page and in every frame, over every cross-origin (or sandboxed) frame element whole, and over every HEAL_MASK
+        locator; animations frozen and the caret hidden. Any failure, including a mask that cannot be resolved, returns
+        None: an unmasked screenshot is never the fallback. What is not masked is on the picture: it shows whatever the page
+        shows."""
         if vision_mode(self.settings) == "off":
             return None
         try:
             targets = [self.page, *[f for f in self.page.frames if f is not self.page.main_frame]]
-            masks = [t.locator(PASSWORD_INPUT) for t in targets]
+            masks = [t.locator(DEFAULT_MASK) for t in targets]
+            for t in targets:
+                embedded = t.locator(FRAME_SELECTOR)
+                masks += [embedded.nth(i) for i, cross in enumerate(embedded.evaluate_all(_CROSS_ORIGIN_JS)) if cross]
             masks += [self.page.locator(selector) for selector in self.settings.mask]
             with self.guard.active():
                 data = self.page.screenshot(type="png", mask=masks, mask_color=MASK_COLOR, animations="disabled", caret="hide")

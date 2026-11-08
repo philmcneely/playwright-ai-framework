@@ -540,8 +540,9 @@ class TestMatchRef:
 class TestSettings:
     def test_defaults_and_accepted_unused_options(self):
         s = HealSettings.from_env({"HEAL_SERVICE_URL": "http://localhost:8765/", "HEAL_VISION": "AUTO",
-                                   "HEAL_MASK": "#pw, .card", "HEAL_TEST_ID_ATTRIBUTE": "data-qa"})
-        assert (s.url, s.vision, s.mask, s.test_id_attribute) == ("http://localhost:8765", "auto", ["#pw", ".card"], "data-qa")
+                                   "HEAL_MASK": "#pw, .card\n.ssn, .dob ;;  [data-x='a;b']", "HEAL_TEST_ID_ATTRIBUTE": "data-qa"})
+        assert (s.url, s.vision, s.mask, s.test_id_attribute) == (
+            "http://localhost:8765", "auto", ["#pw, .card", ".ssn, .dob", "[data-x='a;b']"], "data-qa")
         assert HealSettings.from_env({}).test_id_attribute == "data-testid"
         assert HealSettings.from_env({"HEAL_TEST_ID_ATTRIBUTE": "bad attr!"}).test_id_attribute == "data-testid"
 
