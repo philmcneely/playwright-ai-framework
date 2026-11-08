@@ -131,7 +131,7 @@ HTTP + JSON, versioned under `/v1`. One heal is a short conversation: the client
 
 `source.files` holds only the files named in the failing call stack that sit under `source.roots`, so the page-object file always rides along when a page-object method failed. Caps: 20 files, 256 KB each. The service parses them (Python `ast`, TypeScript via a TS parser), finds the one broken call, and sees every other use of that locator, so one page-object fix covers every test that shares it.
 
-- `page.screenshot` is `{"png_base64": "…"}` when vision is allowed, else `null`. Masked fields (passwords, anything the client marks) are blacked out by the client before sending.
+- `page.screenshot` is `{"media_type": "image/png", "data": "<base64>", "width": <px>, "height": <px>}` when vision is allowed, else `null` (width and height are the PNG's own, in device pixels; the service refuses a file that is not a PNG, is over 4 MB decoded, or whose size differs from what is claimed). `page.viewport` then also carries `scroll: {x, y}`, the CSS-pixel scroll offset when the shot was taken, because inventory boxes are in document coordinates. Masked fields (passwords, anything the client marks) are blacked out by the client before sending.
 - `last_pass` is optional. When present, the service can reject a candidate that lands on a different element than the passing run used.
 - Input `value` attributes are never sent. The service refuses a request that carries any.
 

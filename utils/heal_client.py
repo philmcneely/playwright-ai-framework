@@ -7,6 +7,9 @@ files and the framework's own safety checks, and nothing about models: no model 
 of a model reply live in this repository. The service picks the element and writes the locator; this client only
     - builds the request: the stack files under the source roots (capped, with sha256), the probe's element inventory of the
       reopened failing route, the aria snapshot, the language signals, the last green run's fingerprint and its neighbours
+    - with HEAL_VISION auto or on, takes ONE viewport screenshot of that same page (never full page) with password inputs and
+      the HEAL_MASK locators blacked out, and sends it with the viewport and scroll it was taken in; with off it never takes
+      one and sends null
     - checks every candidate in the live page BEFORE touching a file: the locator must match exactly one element and that
       element must be the one the service expects (the probe's `only` mode describes it; no code from the service is ever
       evaluated, the locator expression is walked and only approved Playwright calls with literal arguments are run)
@@ -16,8 +19,13 @@ of a model reply live in this repository. The service picks the element and writ
       try to the service so it can move to the next candidate
 
 Features:
-    ✓ HealSettings: HEAL_SERVICE_URL, HEAL_SERVICE_TOKEN, HEAL_VISION (accepted; this client never sends a screenshot),
-      HEAL_MASK (accepted, unused until vision), HEAL_TEST_ID_ATTRIBUTE, HEAL_SOURCE_ROOTS, HEAL_STORAGE_STATE, BASE_URL
+    ✓ HealSettings: HEAL_SERVICE_URL, HEAL_SERVICE_TOKEN, HEAL_VISION (off | auto | on), HEAL_MASK, HEAL_TEST_ID_ATTRIBUTE,
+      HEAL_SOURCE_ROOTS, HEAL_STORAGE_STATE, BASE_URL
+    ✓ Vision capture (LivePage.screenshot): off never calls Playwright's screenshot and the request carries `screenshot: null`,
+      so no image byte leaves; auto and on take one viewport PNG with `mask` on every password input and every HEAL_MASK
+      locator (black boxes), animations frozen and the caret hidden. The capture fails closed: any error while masking or
+      capturing, a file that is not a PNG or is over the service's 4 MB limit means no screenshot is sent, never an unmasked one.
+      The request then says `vision: off`
     ✓ ServiceClient: capabilities, probe.js (fetched once), heal, result; every failure is a HealServiceError that names the
       status and the service's reason, never the request
     ✓ Language signals: <html lang>, the browser locale and the Content-Language header of the page load
@@ -26,8 +34,8 @@ Features:
     ✓ A service or browser error ends that heal as needs_human with the reason; it never crashes the run
     ✓ Language branches: the by_language helper (utils/heal_locale.py) is imported into a file that receives branch code
     ✓ Input values are never sent: the aria snapshot goes through heal_redact.redact_typed_values and the inventory is cut to
-      an allowlist of keys on THIS side, whatever the service or its probe promises; no cookie, storage state or screenshot
-      leaves the client
+      an allowlist of keys on THIS side, whatever the service or its probe promises; no cookie or storage state leaves the
+      client, and a screenshot only when HEAL_VISION asks for one
     ✓ Every service reply is untrusted: a replacement is one expression with no comment and no control character whose
       unparse round-trips; the original span must be a pure locator chain AND exactly one expression node of the file on
       disk; the code written is the code checked live (every also-patch is checked live too); a file is written in place
@@ -39,8 +47,11 @@ Features:
 Environment Variables:
     HEAL_SERVICE_URL: base URL of the heal service, for example http://localhost:8765
     HEAL_SERVICE_TOKEN: bearer token, when the service requires one
-    HEAL_VISION: off | auto | on (accepted; screenshots are not captured by this client, so it is always off)
-    HEAL_MASK: locators to mask in a screenshot (accepted, unused until vision)
+    HEAL_VISION: off | auto | on (default off). auto and on send one masked viewport screenshot; the service decides whether a
+        model ever sees it (auto: only when its text pick fails or is a close call; on: every heal) and only a service
+        configured to allow images sends it to a model. Anything else than auto or on is off
+    HEAL_MASK: comma separated CSS selectors (the same strings you would pass to page.locator) blacked out in the screenshot,
+        in addition to every password input
     HEAL_TEST_ID_ATTRIBUTE: the project's test id attribute (default data-testid)
     HEAL_SOURCE_ROOTS: comma separated source roots, relative paths inside the repository (default pages,tests,utils)
     HEAL_PROBE_FROM_SERVICE: "1" to fetch the probe from the service (used only when it is byte-identical to the vendored one)
@@ -52,12 +63,14 @@ Author: PMAC
 ===============================================================================
 """
 import ast
+import base64
 import hashlib
 import json
 import os
 import io
 import re
 import stat
+import struct
 import tokenize
 import unicodedata
 import uuid
@@ -75,7 +88,12 @@ from utils.heal_fingerprints import (call_key, heal_dir, last_pass_for, line_of,
 from utils.heal_locale import page_language
 from utils.heal_redact import clean_inventory, redact_typed_values
 
-LIMITS = {"files": 20, "file_bytes": 256 * 1024, "aria_chars": 256 * 1024}
+LIMITS = {"files": 20, "file_bytes": 256 * 1024, "aria_chars": 256 * 1024, "screenshot_bytes": 4 * 1024 * 1024,
+          "screenshot_side": 8192}
+VISION_MODES = ("auto", "on")                       # HEAL_VISION values that take a screenshot; anything else is off
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+MASK_COLOR = "#000000"
+PASSWORD_INPUT = "input[type=password]"
 HELPER = "by_language"
 HELPER_IMPORT = "from utils.heal_locale import by_language"
 
@@ -480,11 +498,31 @@ def client_version(root: Path) -> str:
         return ""
 
 
+def vision_mode(settings: HealSettings) -> str:
+    """HEAL_VISION as the client acts on it: auto, on, or off for anything else."""
+    return settings.vision if settings.vision in VISION_MODES else "off"
+
+
+def png_screenshot(data: Any) -> Optional[Dict[str, Any]]:
+    """The wire form of a screenshot, {media_type, data (base64), width, height}, or None when `data` is not a PNG the service
+    would take: not bytes, not a PNG, a side over 8192 px or over 4 MB. The size is read from the PNG, never assumed."""
+    if not isinstance(data, (bytes, bytearray)) or len(data) > LIMITS["screenshot_bytes"] or len(data) < 33:
+        return None
+    if bytes(data[:8]) != PNG_SIGNATURE or bytes(data[12:16]) != b"IHDR":
+        return None
+    width, height = struct.unpack(">II", bytes(data[16:24]))
+    if not (1 <= width <= LIMITS["screenshot_side"] and 1 <= height <= LIMITS["screenshot_side"]):
+        return None
+    return {"media_type": "image/png", "data": base64.b64encode(bytes(data)).decode("ascii"), "width": width, "height": height}
+
+
 def build_request(failure: Dict[str, Any], files: List[Dict[str, str]], stack: List[Dict[str, Any]], page: Dict[str, Any],
                   settings: HealSettings, root: Path, last_pass: Optional[Dict[str, Any]] = None,
                   run_id: Optional[str] = None) -> Dict[str, Any]:
-    """The POST /v1/heal body. `page` is a LivePage snapshot: path, language signals, inventory, aria, viewport.
-    No screenshot is ever included (vision is off), and no input value: the inventory comes from the probe."""
+    """The POST /v1/heal body. `page` is a LivePage snapshot: path, language signals, inventory, aria, viewport and, when the
+    client took one, `screenshot` (wire form). A screenshot is included only when HEAL_VISION is auto or on and one was
+    captured; then `options.vision` is that mode and the viewport carries the scroll offset the boxes need. Otherwise the
+    screenshot is null and vision is off. No input value is ever included: the inventory comes from the probe."""
     req: Dict[str, Any] = {
         "client": {"framework": "playwright-ai-framework", "language": "python", "version": client_version(root)},
         "test": {"id": junit_test_id(failure.get("classname", ""), failure["name"], root), "title": failure["name"][:500]},
@@ -497,6 +535,11 @@ def build_request(failure: Dict[str, Any], files: List[Dict[str, str]], stack: L
         "run": {"id": run_id or uuid.uuid4().hex[:12]},
     }
     req["page"]["inventory"] = clean_inventory(page["inventory"])          # allowlisted keys only, never a value
+    shot = page.get("screenshot") if vision_mode(settings) != "off" else None
+    if shot:
+        req["page"]["screenshot"] = shot
+        req["options"]["vision"] = vision_mode(settings)
+        req["page"]["viewport"] = {**(page.get("viewport") or {}), "scroll": page.get("scroll") or {"x": 0, "y": 0}}
     aria = redact_typed_values(page["aria"]) if isinstance(page.get("aria"), str) else ""
     if aria and len(aria) <= LIMITS["aria_chars"]:
         req["page"]["aria_snapshot"] = aria
@@ -732,7 +775,8 @@ class OriginGuard:
 
 class LivePage:
     """A fresh Chromium on the failing route (HEAL_STORAGE_STATE when set). It stays open for the whole heal so each
-    candidate can be checked on the same page the inventory came from. Never screenshots."""
+    candidate can be checked on the same page the inventory came from. It screenshots only when HEAL_VISION asks, once, as a
+    masked viewport shot (see `screenshot`)."""
 
     def __init__(self, settings: HealSettings, route: str, probe: str):
         self.settings, self.route, self.probe = settings, route or "/", probe
@@ -784,10 +828,29 @@ class LivePage:
         except Exception:
             aria = None
         view = meta.get("viewport") or {}
+        scroll = meta.get("scroll") or {}
         return {"path": urlsplit(self.page.url).path or "/", "inventory": self.inventory, "more": int(data.get("more") or 0),
                 "aria": aria, "viewport": {"w": view.get("width"), "h": view.get("height"), "dpr": meta.get("dpr")},
+                "scroll": {"x": max(0, scroll.get("x") or 0), "y": max(0, scroll.get("y") or 0)},
                 "language": {"html_lang": meta.get("lang") or None, "browser_locale": meta.get("browser_lang") or None,
                              "content_language": header}}
+
+    def screenshot(self) -> Optional[Dict[str, Any]]:
+        """ONE viewport screenshot in wire form, or None. With HEAL_VISION off Playwright is never asked for one. Otherwise the
+        shot is the viewport only (never full_page: a late scroll restore shifts the page), with a black box over every
+        password input (the page's frames too) and over every HEAL_MASK locator, animations frozen and the caret hidden. Any
+        failure, including a mask that cannot be resolved, returns None: an unmasked screenshot is never the fallback."""
+        if vision_mode(self.settings) == "off":
+            return None
+        try:
+            targets = [self.page, *[f for f in self.page.frames if f is not self.page.main_frame]]
+            masks = [t.locator(PASSWORD_INPUT) for t in targets]
+            masks += [self.page.locator(selector) for selector in self.settings.mask]
+            with self.guard.active():
+                data = self.page.screenshot(type="png", mask=masks, mask_color=MASK_COLOR, animations="disabled", caret="hide")
+        except Exception:
+            return None
+        return png_screenshot(data)
 
     def check(self, expression: str) -> Tuple[Optional[int], Optional[str]]:
         """(match count, inventory ref of the one element hit). The ref is None unless the count is 1 and the element can
@@ -850,6 +913,8 @@ class Healer:
         kept: List[PlannedFile] = []
         with self.live_factory(route, probe) as live:
             snap = live.snapshot()
+            if vision_mode(self.settings) != "off":                 # off: the page is never asked for a screenshot
+                snap = {**snap, "screenshot": live.screenshot() if hasattr(live, "screenshot") else None}
             request = build_request(failure, files, stack, snap, self.settings, self.root, last_pass, self.run_id)
             resp = self.service.heal(request)
             while resp.get("status") == "try" and resp.get("candidate"):
