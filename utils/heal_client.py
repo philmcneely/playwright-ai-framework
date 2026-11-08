@@ -863,18 +863,11 @@ class LivePage:
         with self.guard.active():
             data = self.page.evaluate(self.probe)
         meta = data.get("page") or {}
-        header = None
-        try:
-            header = self._response.headers.get("content-language") if self._response else None
-        except Exception:
-            pass
         self.inventory = clean_inventory([{**item, "ref": f"e{i}"} for i, item in enumerate(data.get("items") or [])
                                           if isinstance(item, dict)])
-        self.language = page_language(meta.get("lang"), meta.get("browser_lang"), header)
-        try:                                     # the by_language helper reads the same Content-Language the client used
-            self.page._heal_content_language = header
-        except Exception:
-            pass
+        # <html lang>, then the browser locale: the two signals the by_language helper can read in the page at any time, so the
+        # branch checked here is the branch the verify re-run picks. Content-Language is not used (the helper cannot see it).
+        self.language = page_language(meta.get("lang"), meta.get("browser_lang"))
         try:
             with self.guard.active():
                 editable = editable_texts(self.page)
@@ -885,7 +878,7 @@ class LivePage:
         return {"path": urlsplit(self.page.url).path or "/", "inventory": self.inventory, "more": int(data.get("more") or 0),
                 "aria": aria, "viewport": {"w": view.get("width"), "h": view.get("height"), "dpr": meta.get("dpr")},
                 "language": {"html_lang": meta.get("lang") or None, "browser_locale": meta.get("browser_lang") or None,
-                             "content_language": header}}
+                             "content_language": None}}
 
     def check(self, expression: str) -> Tuple[Optional[int], Optional[str]]:
         """(match count, inventory ref of the one element hit). The ref is None unless the count is 1 and the element can

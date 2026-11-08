@@ -49,7 +49,7 @@ class FakeLive:
         self.service, self.checked = service, []
         self.inventory = [{**item, "ref": f"e{i}"} for i, item in enumerate(page.get("inventory", []))]
         lang = page.get("language") or {}
-        self.language = page_language(lang.get("html_lang"), lang.get("browser_locale"), lang.get("content_language"))
+        self.language = page_language(lang.get("html_lang"), lang.get("browser_locale"))
         self._snap = {"path": "/" + page["url"].split("/", 3)[-1], "inventory": page.get("inventory", []), "more": 0, "aria": None,
                       "viewport": {"w": 1280, "h": 720, "dpr": 1}, "language": lang}
 
