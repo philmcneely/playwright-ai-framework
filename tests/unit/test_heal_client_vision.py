@@ -165,6 +165,9 @@ class FakeFrame:
     def locator(self, selector):
         return FakeLocator(self.name, selector, self.embedded if "iframe" in selector else ())
 
+    def evaluate(self, script, *args):
+        return None
+
 
 class FakePage(FakeFrame):
     url = "http://localhost:7080/login"
@@ -199,9 +202,9 @@ class TestCapture:
         assert kw["animations"] == "disabled" and kw["caret"] == "hide"
         picked = [(m.owner, m.selector) for m in kw["mask"]]
         for owner in ("main", "child-1", "child-2"):
-            (default,) = [s for o, s in picked if o == owner and "type=password" in s]
-            for must in ('input[autocomplete*="cc-" i]', 'autocomplete*="one-time-code"', 'autocomplete*="current-password"',
-                         'autocomplete*="new-password"', 'input[name*="pass" i]', 'input[id*="pwd" i]', 'input[name*="token" i]',
+            (default,) = [s for o, s in picked if o == owner and "type=\"password\"" in s]
+            for must in ('input[autocomplete^="cc-" i]', 'autocomplete="one-time-code"', 'autocomplete*="password"',
+                         'input[name*="pass" i]', 'input[id*="pwd" i]', 'input[name*="token" i]',
                          'input[name*="secret" i]', 'input[id*="ssn" i]', 'input[name*="card" i]', 'input[name*="cvv" i]',
                          'input[name*="otp" i]'):
                 assert must in default, (owner, must)

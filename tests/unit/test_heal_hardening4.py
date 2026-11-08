@@ -266,8 +266,14 @@ def test_the_live_page_blocks_service_workers_and_routes_before_the_first_naviga
             order.append(("goto", route))
 
     class Ctx:
+        def add_init_script(self, script):
+            order.append(("init", None))
+
         def route(self, pattern, handler):
             order.append(("route", pattern))
+
+        def route_web_socket(self, pattern, handler):
+            order.append(("ws", pattern))
 
         def new_page(self):
             return Page()
@@ -292,8 +298,9 @@ def test_the_live_page_blocks_service_workers_and_routes_before_the_first_naviga
     monkeypatch.setattr(sync_api, "sync_playwright", lambda: Pw())
     with hc.LivePage(HealSettings(base_url=BASE), "/login", "probe"):
         pass
-    assert [o[0] for o in order] == ["context", "route", "goto"]
-    assert order[0][1]["service_workers"] == "block" and order[1][1] == "**/*"
+    kinds = [o[0] for o in order]
+    assert kinds[0] == "context" and kinds[-1] == "goto" and {"route", "ws"} <= set(kinds)     # every route is set before the first goto
+    assert order[0][1]["service_workers"] == "block" and ("route", "**/*") in order and ("ws", "**/*") in order
 
 
 def test_the_guard_aborts_a_foreign_request_even_before_any_probe():

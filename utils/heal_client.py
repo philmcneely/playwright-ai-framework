@@ -98,29 +98,66 @@ LIMITS = {"files": 20, "file_bytes": 256 * 1024, "aria_chars": 256 * 1024, "scre
 VISION_MODES = ("auto", "on")                       # HEAL_VISION values that take a screenshot; anything else is off
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 MASK_COLOR = "#000000"
-PASSWORD_INPUT = "input[type=password]"
 # Fields blacked out in every screenshot whatever HEAL_MASK says: passwords, card and one-time-code fields by autocomplete, and any
 # field whose name or id says it holds a secret (this also covers a password field a script turned into type=text, as long as it
 # kept a password-like name: the client cannot see what a field *used to be*).
 SECRET_TERMS = ("pass", "pwd", "token", "secret", "ssn", "card", "cvv", "otp")
 DEFAULT_MASK = ", ".join(
-    [PASSWORD_INPUT, 'input[autocomplete*="cc-" i]', 'input[autocomplete*="one-time-code" i]',
-     'input[autocomplete*="current-password" i]', 'input[autocomplete*="new-password" i]']
+    ['input[type="password" i]', 'input[autocomplete^="cc-" i]', 'input[autocomplete="one-time-code" i]',
+     'input[autocomplete*="password" i]', "[data-heal-mask]"]
     + [f'{tag}[{attr}*="{term}" i]' for term in SECRET_TERMS for attr in ("name", "id") for tag in ("input", "textarea")])
 FRAME_SELECTOR = "iframe, frame, embed, object"
+# Remembers every input that is, or ever becomes, type=password (a show-password toggle makes it type=text). The memory is a WeakSet
+# in the page's own closure, reachable only through a non-configurable Symbol function: NO attribute is set on the DOM while the
+# probe, the aria snapshot or a candidate check runs. `markMasked(true)` (called only around the screenshot) sets data-heal-mask on
+# them and `markMasked(false)` removes it. The same script as the TypeScript client's.
+WAS_PASSWORD = """(() => {
+  const was = new WeakSet();
+  const nativeSet = Element.prototype.setAttribute;
+  const isPw = (el) => el instanceof HTMLInputElement && el.type === "password";
+  const note = (el) => was.add(el);
+  const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "type");
+  Object.defineProperty(HTMLInputElement.prototype, "type", { configurable: true, enumerable: d.enumerable, get: d.get,
+    set(v) { if (isPw(this) || String(v).toLowerCase() === "password") note(this); d.set.call(this, v); } });
+  Element.prototype.setAttribute = function (name, value) {
+    if (this instanceof HTMLInputElement && String(name).toLowerCase() === "type" && (isPw(this) || String(value).toLowerCase() === "password")) note(this);
+    return nativeSet.call(this, name, value);
+  };
+  const scan = (root) => { if (root.querySelectorAll) { if (isPw(root)) note(root); root.querySelectorAll("input").forEach((i) => isPw(i) && note(i)); } };
+  new MutationObserver((records) => { for (const r of records) { if (r.type === "attributes") isPw(r.target) && note(r.target); else r.addedNodes.forEach(scan); } })
+    .observe(document, { attributes: true, attributeFilter: ["type"], childList: true, subtree: true });
+  document.addEventListener("DOMContentLoaded", () => scan(document));
+  const marks = (root, out) => { root.querySelectorAll("input").forEach((i) => { if (isPw(i) || was.has(i)) out.push(i); });
+    root.querySelectorAll("*").forEach((e) => e.shadowRoot && marks(e.shadowRoot, out)); return out; };
+  Object.defineProperty(window, Symbol.for("heal.markMasked"), { configurable: false, enumerable: false, value: (on) => {
+    for (const el of marks(document, [])) on ? nativeSet.call(el, "data-heal-mask", "1") : el.removeAttribute("data-heal-mask");
+  } });
+})();"""
+MARK_MASKED_JS = "(on) => { const f = window[Symbol.for('heal.markMasked')]; if (f) f(on); }"
+CLEAR_EDITABLE_JS = """() => {
+  const clear = (root) => {
+    for (const el of root.querySelectorAll("[contenteditable]:not([contenteditable=false i])")) el.textContent = "";
+    for (const el of root.querySelectorAll("*")) if (el.shadowRoot) clear(el.shadowRoot);
+  };
+  clear(document);
+}"""
 _INHERITING_URLS = ("", "about:blank", "about:srcdoc")     # a document with no origin of its own takes its parent's
 
 
-def _origin(url: str) -> Optional[str]:
-    """scheme://host:port of an http(s) url, None for anything else (data:, blob:, javascript:, unparseable)."""
+def _origin(url: str) -> Optional[Tuple[str, str, int]]:
+    """(scheme, lower-case host, port) of an http(s) or ws(s) url (ws is http and wss is https: a socket to the page's own host is
+    the page's own origin), None for anything else: data:, blob:, javascript:, about:, chrome-error:, no host, unparseable."""
     try:
-        u = urlsplit(url or "")
+        parts = urlsplit(url or "")
+        scheme = {"ws": "http", "wss": "https"}.get(parts.scheme.lower(), parts.scheme.lower())
+        host = (parts.hostname or "").lower()
+        port = parts.port or {"http": 80, "https": 443}.get(scheme, 0)
     except ValueError:
         return None
-    return f"{u.scheme}://{u.netloc}".lower() if u.scheme in ("http", "https") and u.netloc else None
+    return (scheme, host, port) if scheme in ("http", "https") and host else None
 
 
-def _foreign(frame: Any, page_origin: Optional[str], main: Any) -> bool:
+def _foreign(frame: Any, page_origin: Optional[Tuple[str, str, int]], main: Any) -> bool:
     """Whether the document a LIVE frame holds now is not this page's origin: judged from frame.url after every redirect and
     script navigation, never from the iframe's src attribute. about:blank and srcdoc inherit the parent's origin, so they are
     foreign only when the parent is; anything unparseable, or a page whose own origin is unknown, is foreign."""
@@ -141,13 +178,16 @@ ALLOWED_LOCATOR_METHODS = {
     "get_by_test_id", "get_by_alt_text", "get_by_title", "first", "last", "nth", "filter",
 }
 _LANG_KEY = re.compile(r"^[a-z]{2,3}$")
-# a CSS attribute selector that matches by prefix, suffix, substring, word or language (`[a^=x]`, `[a*=x]`, `[a$=x]`,
-# `[a~=x]`, `[a|=x]`) or reads an input's value (`[value=...]`, `[value]`): the service never writes one, so one is refused.
-# A selector with a backslash (a CSS escape can spell `value` as `\\76alue`) or a `/*` comment is refused outright.
-# a selector engine or chain that reaches past plain CSS: `xpath=`, an XPath starting `//` or `..`, `internal:` engines and `>>`
-# chains: the service never writes one
-_BAD_ENGINE = re.compile(r"^\s*(?:xpath\s*=|internal:|//|\.\.)|>>", re.I)
-_BAD_SELECTOR = re.compile(r"\[[^\]]*?[\^*$~|]=|\[\s*(?:default)?value\b", re.I)
+# A selector the client will not run, the same list as the TypeScript client's PROBING_SELECTOR. The service writes plain CSS only
+# (`#id`, `[attr=value]`, `tag[data-x="y"]`, a row scope then a child): never another engine (`xpath=`, `css=`, `text=`, `role=`,
+# `id=`, `data-testid=`, `internal:`), a `>>` chain, an xpath, a backslash escape (a CSS escape such as `[\76 alue=x]` spells a
+# banned name), a comment, or an operator that reads a value back one character at a time (prefix, suffix, substring, word or
+# dash match, any selector on `value`, `:has-text`, `:text*`, `:nth-match`, hidden inputs).
+PROBING_SELECTOR = re.compile("|".join([
+    r"\[\s*[^\]=\s]+\s*[\^*$~|]=", r"\[\s*value\s*[\^*$~|]?=", ":has-text", ":text", ":nth-match", r"""\btype\s*=\s*["']?hidden""",
+    r">>", "internal:", r"\\", r"/\*", r"^\s*[A-Za-z][\w-]*\s*=", r"^\s*\(?\s*(?:\/\/|\.\.)",
+    r"\[\s*(?:default)?value\b",                     # beyond the TypeScript list: `[value]` and `[defaultValue=...]` read a value too
+]), re.I)
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 _NETWORK_SCHEMES = {"http", "https", "ws", "wss"}
 _BAD_CATEGORIES = {"Cc", "Cf", "Cs", "Zl", "Zp"}        # control, format (bidi), lone surrogate, line and paragraph separators
@@ -423,8 +463,7 @@ def validate_replacement(proposed, original):
                     return None
             if isinstance(node.func, ast.Attribute) and node.func.attr == "locator":
                 for arg in [*node.args, *(k.value for k in node.keywords)]:       # `locator(selector=...)` too
-                    if isinstance(arg.value, str) and (_BAD_SELECTOR.search(arg.value) or _BAD_ENGINE.search(arg.value)
-                                                       or "\\" in arg.value or "/*" in arg.value):
+                    if isinstance(arg.value, str) and PROBING_SELECTOR.search(arg.value):
                         return None
 
         elif not isinstance(node, (ast.Name, ast.Constant, ast.Load, ast.keyword)):
@@ -514,6 +553,8 @@ def build_locator(page: Any, expression: str) -> Any:
             kwargs = {k.arg: k.value.value for k in n.keywords if k.arg and isinstance(k.value, ast.Constant)}
             if len(args) != len(n.args) or len(kwargs) != len(n.keywords):
                 raise ValueError("non-literal argument")
+            if f.attr == "locator" and any(isinstance(v, str) and PROBING_SELECTOR.search(v) for v in (*args, *kwargs.values())):
+                raise ValueError("unsafe selector")           # every expression run on the live page passes through here
             return getattr(walk(f.value), f.attr)(*args, **kwargs)
         if isinstance(n, ast.Attribute):
             if n.attr in ("first", "last"):
@@ -607,7 +648,8 @@ def safe_route(route: Any, base_url: str) -> str:
     if not isinstance(route, str) or not route.startswith("/") or route.startswith("//") or "\\" in route or _has_control(route) \
             or len(route) > 2000:
         raise ValueError("the page route is not a plain path on the app under test")
-    if _origin(urljoin(base_url.rstrip("/") + "/", route)) != _origin(base_url):
+    here = _origin(base_url)
+    if here is None or _origin(urljoin(base_url.rstrip("/") + "/", route)) != here:
         raise ValueError("the page route leaves the app under test")
     return route
 
@@ -864,16 +906,6 @@ def match_ref(inventory: List[Dict[str, Any]], facts: Dict[str, Any]) -> Optiona
     return exact[0] if len(exact) == 1 else None
 
 
-def _origin(url: str) -> Tuple[str, str, int]:
-    parts = urlsplit(url)
-    scheme = parts.scheme.lower()
-    try:
-        port = parts.port or {"http": 80, "https": 443, "ws": 80, "wss": 443}.get(scheme, 0)
-    except ValueError:
-        port = -1
-    return scheme, (parts.hostname or "").lower(), port
-
-
 class OriginGuard:
     """Playwright route handler: a request to an origin other than BASE_URL's is aborted for the whole session, the first
     navigation included, so neither the page nor the probe nor anything a page wires up can send what it reads to another
@@ -882,17 +914,33 @@ class OriginGuard:
 
     def __init__(self, base_url: str, allow: Tuple[str, ...] = ()):
         self.origin = _origin(base_url)
-        self.allowed = {self.origin, *(_origin(a) for a in allow)}        # BASE_URL's origin and HEAL_ALLOW_ORIGINS, exactly
+        self.allowed = {o for o in (self.origin, *(_origin(a) for a in allow)) if o is not None}   # BASE_URL's origin + HEAL_ALLOW_ORIGINS
         self.probing = True
 
     def handle(self, route: Any, request: Any = None) -> None:
         url = (request or route.request).url
-        foreign = urlsplit(url).scheme.lower() in _NETWORK_SCHEMES and _origin(url) not in self.allowed
+        foreign = self.foreign(url)
         try:
             if foreign:
                 route.abort()
             else:
                 route.continue_()
+        except Exception:                                      # the page closed under the route
+            pass
+
+    def foreign(self, url: str) -> bool:
+        """Whether a request to `url` leaves the allowed origins. A network scheme with an origin we cannot read is foreign."""
+        if urlsplit(url).scheme.lower() not in _NETWORK_SCHEMES:
+            return False
+        return _origin(url) not in self.allowed
+
+    def handle_websocket(self, ws: Any) -> None:
+        """Playwright WebSocket route handler: a socket to a foreign origin is closed, any other is connected to the server."""
+        try:
+            if self.foreign(ws.url):
+                ws.close()
+            else:
+                ws.connect_to_server()
         except Exception:                                      # the page closed under the route
             pass
 
@@ -921,7 +969,9 @@ class LivePage:
             ctx = self._browser.new_context(
                 base_url=self.settings.base_url, service_workers="block",       # a service worker would answer outside the guard
                 **({"storage_state": self.settings.storage_state} if self.settings.storage_state else {}))
+            ctx.add_init_script(WAS_PASSWORD)
             ctx.route("**/*", self.guard.handle)
+            ctx.route_web_socket("**/*", self.guard.handle_websocket)       # a page's own sockets are inside the guard too
             self.page = ctx.new_page()
             self._response = self.page.goto(self.route)
         except BaseException:
@@ -972,6 +1022,8 @@ class LivePage:
             return None
         try:
             targets = [self.page, *[f for f in self.page.frames if f is not self.page.main_frame]]
+            for frame in self.page.frames:                       # what a person typed into an editable region is on the picture
+                frame.evaluate(CLEAR_EDITABLE_JS)
             masks = [t.locator(DEFAULT_MASK) for t in targets]
             page_origin = _origin(self.page.url)
             for t in targets:
@@ -984,11 +1036,23 @@ class LivePage:
                     if child is None or opaque or _foreign(child, page_origin, self.page.main_frame):
                         masks.append(element)
             masks += [self.page.locator(selector) for selector in self.settings.mask]
-            with self.guard.active():
-                data = self.page.screenshot(type="png", mask=masks, mask_color=MASK_COLOR, animations="disabled", caret="hide")
+            self._mark_masked(True)                              # inputs that were ever type=password: an attribute, only now
+            try:
+                with self.guard.active():
+                    data = self.page.screenshot(type="png", mask=masks, mask_color=MASK_COLOR, animations="disabled", caret="hide")
+            finally:
+                self._mark_masked(False)
         except Exception:
             return None
         return png_screenshot(data)
+
+    def _mark_masked(self, on: bool) -> None:
+        for frame in self.page.frames:
+            try:
+                frame.evaluate(MARK_MASKED_JS, on)
+            except Exception:
+                if on:
+                    raise                                         # a frame that cannot be marked cannot be trusted masked
 
     def check(self, expression: str) -> Tuple[Optional[int], Optional[str]]:
         """(match count, inventory ref of the one element hit). The ref is None unless the count is 1 and the element can
@@ -1096,7 +1160,14 @@ class Healer:
         expression = _expression_for(cand, language)
         if expression is None:
             return self._report(heal_id, {"count": None, "error": "no branch for the page's language"}), []
-        if not cand.get("branches") and check_replacement(expression, cand["patch"]["from"]):
+        if cand.get("branches"):
+            # the page-language branch is checked on its own like a plain locator; the branch that IS the failing call (the old
+            # language) is the file's own code and is allowed to equal it
+            same = _normal(expression) == _normal(cand["patch"]["from"])
+            unsafe = validate_replacement(expression, cand["patch"]["from"]) is None and not same
+        else:
+            unsafe = bool(check_replacement(expression, cand["patch"]["from"]))
+        if unsafe:
             return self._report(heal_id, {"count": None, "error": "the locator is not a safe expression"}), []
         if not cand.get("branches") and _normal(cand["patch"]["to"]) != _normal(expression):
             return self._report(heal_id, {"count": None, "error": "the patch is not the locator that was checked"}), []
