@@ -154,9 +154,12 @@ element that only appears after a click or login step may be missing from the
 inventory (set `HEAL_STORAGE_STATE` for login); only locators the test acts on
 (`click`, `fill`, `check`, `select_option`, ...) are fingerprinted.
 
-> This repo also keeps a **legacy** in-run Ollama healer (the `conftest.py`
-> AI-healing hooks + `AI_HEALING_ENABLED`). That is the older "heal during the
-> run" approach; the agents + `heal.py` above are the v2 out-of-band replacement.
+> The older in-run Ollama healer (`utils/ai_healing.py` + `AI_HEALING_ENABLED`) is
+> **deprecated** and no longer called. Its replacement is in-run *advice* from the heal
+> service: set `HEAL_ADVISE=on` and `HEAL_SERVICE_URL` and a final locator failure is posted
+> to the service in advise mode (a decision and the best locator, no patch, no edit); the
+> answer goes into the healing report, `heal-summary.json` and the observability report.
+> The agents + `heal.py` above remain the out-of-band way to apply a heal.
 
 ---
 

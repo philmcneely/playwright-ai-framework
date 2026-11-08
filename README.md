@@ -253,6 +253,31 @@ await api_mocker.mock_get("**/api/users", {"users": [{"id": 1}]})
 
 ## 14. AI Self-Healing
 
+### In-run heal advice (heal service, advise mode)
+
+When a test fails for good (after its `--reruns`) the framework can ask the **heal
+service** what the broken locator should be, while the failing page is still open.
+The service answers in *advise* mode: a decision and the best locator, never a patch.
+Nothing in the repository is edited, and this repository holds no model URL, model name
+or prompt: the service owns them.
+
+```bash
+HEAL_ADVISE=on HEAL_SERVICE_URL=http://localhost:8765 [HEAL_SERVICE_TOKEN=...] pytest --reruns 2
+```
+
+The decision is written to `test_artifacts/ai/ai_healing_reports/<test>_<time>_heal_advice.md`
+(and attached to the Allure report), to `test_artifacts/heal-summary.json` (mode `advise`:
+counts, token total, every decision) and, with `OBSERVABILITY_ENABLED=true`, to the
+observability report (`heal_outcome`, `heal_strategy`, `heal_tier_movement`, `heal_tokens`).
+What is sent is the failing stack's source files, the probe's element inventory of the
+page (attributes and copy, never an input value), the aria snapshot with typed text removed
+and, when `HEAL_FINGERPRINTS=on` recorded one, the last green run's fingerprint of the line.
+No screenshot is sent. Advice is skipped inside `scripts/heal.py` runs.
+
+> The older in-run Ollama healer (`utils/ai_healing.py`, `AI_HEALING_ENABLED`) is
+> **deprecated**: nothing calls it any more and `AI_HEALING_ENABLED` does nothing. The
+> Ollama notes below describe that removed path and are kept only for reference.
+
 The Ollama Python library is installed as part of `requirements_with_versions.txt`.
 
 # Ollama Model Setup for AI Healing
@@ -359,6 +384,16 @@ Flags: `-k <name>` (scope to tests), `--max N` (cap failures handled; the rest a
 recorded as needs-human), `--open-pr` (assemble one PR with the per-failure
 decisions and the untouched/for-human list). It prints every decision with its
 token usage and a run total, and writes `test_artifacts/heal-summary.json`.
+
+**After the PR.** With `--open-pr`, each healed locator is recorded in
+`.heal/heals.json` (`heal_id`, file, `from`, `to`, test, PR URL). On the next
+`scripts/heal.py` run the client works out what became of each one from `gh` and the file
+on disk (PR still open, closed unmerged, merged unchanged, edited by a person, or
+reverted), whether the test failed again, and the runs and days since, and tells the
+service, which turns it into a kept rate, durability and escaped-wrong-heal numbers. It
+skips quietly when `gh` or the service is unavailable and never fails the run. Durability
+("still passing 10 runs and 30 days later") needs the service's `HEAL_RETENTION_DAYS` to
+be at least 31.
 
 Optional: `HEAL_FINGERPRINTS=on` makes the test run record what each locator hit on
 a clean green run (`.heal/fingerprints.json`, git-ignored automatically), so the
