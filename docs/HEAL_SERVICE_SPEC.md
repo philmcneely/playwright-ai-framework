@@ -375,5 +375,6 @@ Each phase ships as a PR to the repo it touches, reviewed before merge. Phases 1
 - **Decided (2026-11-05):** the fingerprint file is not committed by default (see Client integration).
 - **Decided (2026-11-05):** the client sends the project's test-id attribute (default `data-testid`), so `get_by_test_id` is only written when it matches what the project configures.
 - **Decided (2026-11-05):** in phase 1, a heal whose only unique locator is structural or positional ends `needs_human` instead of writing one.
-- **Open:** the license, chosen before the repo goes public.
-- **Open:** one shared service instance for a team, or one per developer by default. The spec supports both. This only changes the docs and the default bind address.
+- **Decided (2026-11-08):** the service stays private for now; the license is chosen when it goes public.
+- **Decided (2026-11-08):** one service per developer is the documented default (bound to `127.0.0.1`, no token, next to the tests). A shared team instance is the documented option: bind wider with `--allow-remote` and a token, behind TLS.
+- **Decided (2026-11-08):** component-library class names (for example `MuiSelect-select`) are an opt-in locator source (`HEAL_LIBRARY_CLASSES`), off by default and ranked below test ids and plain `data-*` hooks.
