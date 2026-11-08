@@ -106,16 +106,29 @@ DEFAULT_MASK = ", ".join(
      'input[autocomplete*="current-password" i]', 'input[autocomplete*="new-password" i]']
     + [f'{tag}[{attr}*="{term}" i]' for term in SECRET_TERMS for attr in ("name", "id") for tag in ("input", "textarea")])
 FRAME_SELECTOR = "iframe, frame, embed, object"
-# which of a frame's embedded documents are another origin (or an opaque sandbox): they are masked whole
-_CROSS_ORIGIN_JS = """els => els.map(e => {
-  try {
-    const src = e.getAttribute('src') || e.getAttribute('data') || '';
-    const sandbox = e.getAttribute('sandbox');
-    if (sandbox !== null && !/allow-same-origin/.test(sandbox)) return true;
-    if (!src || /^(about:|javascript:)/i.test(src)) return false;
-    return new URL(src, location.href).origin !== location.origin;
-  } catch (_) { return true; }
-})"""
+_INHERITING_URLS = ("", "about:blank", "about:srcdoc")     # a document with no origin of its own takes its parent's
+
+
+def _origin(url: str) -> Optional[str]:
+    """scheme://host:port of an http(s) url, None for anything else (data:, blob:, javascript:, unparseable)."""
+    try:
+        u = urlsplit(url or "")
+    except ValueError:
+        return None
+    return f"{u.scheme}://{u.netloc}".lower() if u.scheme in ("http", "https") and u.netloc else None
+
+
+def _foreign(frame: Any, page_origin: Optional[str], main: Any) -> bool:
+    """Whether the document a LIVE frame holds now is not this page's origin: judged from frame.url after every redirect and
+    script navigation, never from the iframe's src attribute. about:blank and srcdoc inherit the parent's origin, so they are
+    foreign only when the parent is; anything unparseable, or a page whose own origin is unknown, is foreign."""
+    if frame is main:
+        return False
+    if (frame.url or "").lower() in _INHERITING_URLS:
+        parent = getattr(frame, "parent_frame", None)
+        return True if parent is None else _foreign(parent, page_origin, main)
+    origin = _origin(frame.url)
+    return origin is None or page_origin is None or origin != page_origin
 HELPER = "by_language"
 HELPER_IMPORT = "from utils.heal_locale import by_language"
 
@@ -860,7 +873,7 @@ class LivePage:
     def screenshot(self) -> Optional[Dict[str, Any]]:
         """ONE viewport screenshot in wire form, or None. With HEAL_VISION off Playwright is never asked for one. Otherwise the
         shot is the viewport only (never full_page: a late scroll restore shifts the page), with a black box over DEFAULT_MASK
-        in the page and in every frame, over every cross-origin (or sandboxed) frame element whole, and over every HEAL_MASK
+        in the page and in every frame, over every frame element whole whose live document is another origin (or sandboxed), and over every HEAL_MASK
         locator; animations frozen and the caret hidden. Any failure, including a mask that cannot be resolved, returns
         None: an unmasked screenshot is never the fallback. What is not masked is on the picture: it shows whatever the page
         shows."""
@@ -869,9 +882,16 @@ class LivePage:
         try:
             targets = [self.page, *[f for f in self.page.frames if f is not self.page.main_frame]]
             masks = [t.locator(DEFAULT_MASK) for t in targets]
+            page_origin = _origin(self.page.url)
             for t in targets:
                 embedded = t.locator(FRAME_SELECTOR)
-                masks += [embedded.nth(i) for i, cross in enumerate(embedded.evaluate_all(_CROSS_ORIGIN_JS)) if cross]
+                for i in range(embedded.count()):
+                    element = embedded.nth(i)
+                    handle = element.element_handle(timeout=2000)
+                    child, sandbox = handle.content_frame(), handle.get_attribute("sandbox")
+                    opaque = sandbox is not None and "allow-same-origin" not in sandbox
+                    if child is None or opaque or _foreign(child, page_origin, self.page.main_frame):
+                        masks.append(element)
             masks += [self.page.locator(selector) for selector in self.settings.mask]
             with self.guard.active():
                 data = self.page.screenshot(type="png", mask=masks, mask_color=MASK_COLOR, animations="disabled", caret="hide")

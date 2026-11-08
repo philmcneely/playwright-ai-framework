@@ -128,37 +128,52 @@ class TestWireForm:
 
 
 # ---- the capture itself, with a fake Playwright page --------------------------------------------------------------------
-class FakeLocator:
-    def __init__(self, owner, selector, cross=()):
-        self.owner, self.selector, self.cross = owner, selector, cross
+class FakeHandle:
+    def __init__(self, child, sandbox):
+        self.child, self.sandbox = child, sandbox
 
-    def evaluate_all(self, script):
-        return [i in self.cross for i in range(max([-1, *self.cross]) + 1)]
+    def content_frame(self):
+        return self.child
+
+    def get_attribute(self, name):
+        return self.sandbox if name == "sandbox" else None
+
+
+class FakeLocator:
+    def __init__(self, owner, selector, embedded=()):
+        self.owner, self.selector, self.embedded = owner, selector, list(embedded)
+
+    def count(self):
+        return len(self.embedded)
 
     def nth(self, i):
-        return FakeLocator(self.owner, f"{self.selector}:nth({i})")
+        return FakeLocator(self.owner, f"{self.selector}:nth({i})", [self.embedded[i]])
+
+    def element_handle(self, timeout=None):
+        child, sandbox = self.embedded[0]
+        return FakeHandle(child, sandbox)
 
 
 class FakeFrame:
-    def __init__(self, name, cross=()):
-        self.name, self.cross = name, cross
+    """A frame with a live url, a parent and the frame elements it contains: [(child frame or None, sandbox attribute)]."""
+
+    def __init__(self, name, url="http://localhost:7080/login", parent=None, embedded=()):
+        self.name, self.url, self.parent_frame, self.embedded = name, url, parent, list(embedded)
 
     def locator(self, selector):
-        return FakeLocator(self.name, selector, self.cross if selector.startswith("iframe") else ())
+        return FakeLocator(self.name, selector, self.embedded if "iframe" in selector else ())
 
 
 class FakePage(FakeFrame):
     url = "http://localhost:7080/login"
 
-    def __init__(self, fail=None):
+    def __init__(self, fail=None, children=()):
         super().__init__("main")
         self.main_frame = self
-        self.cross = ()
-        self.frames = [self, FakeFrame("child-1"), FakeFrame("child-2")]
+        for child in children:
+            child.parent_frame = child.parent_frame or self
+        self.frames = [self, FakeFrame("child-1", parent=self), FakeFrame("child-2", parent=self), *children]
         self.calls, self.fail = [], fail
-
-    def locator(self, selector):
-        return FakeLocator(self.name, selector, self.cross if selector.startswith("iframe") else ())
 
     def screenshot(self, **kw):
         self.calls.append(kw)
@@ -190,22 +205,61 @@ class TestCapture:
                 assert must in default, (owner, must)
         assert ("main", "#card-number") in picked and ("main", ".ssn, .dob") in picked
 
-    def test_every_cross_origin_frame_element_is_masked_whole(self):
-        page = FakePage()
-        page.cross = (0, 2)
+    def masked_frames(self, page):
         lp = live_page(page=page)
         assert lp.screenshot() is not None
         (kw,) = page.calls
-        owners = [(m.owner, m.selector) for m in kw["mask"] if "nth" in m.selector]
-        assert [s.split(":nth")[1] for o, s in owners if o == "main"] == ["(0)", "(2)"]
+        return [m.selector.split(":nth")[1] for m in kw["mask"] if m.owner == "main" and ":nth" in m.selector]
+
+    def test_a_frame_is_masked_by_its_live_url_not_by_its_src(self):
+        same = FakeFrame("same", url="http://localhost:7080/other")
+        cross = FakeFrame("cross", url="http://elsewhere.test/card")
+        redirected = FakeFrame("redir", url="http://elsewhere.test/card")      # its src said /redir on this origin
+        page = FakePage(children=[same, cross, redirected])
+        page.embedded = [(same, None), (cross, None), (redirected, None)]
+        assert self.masked_frames(page) == ["(1)", "(2)"]
+
+    def test_about_blank_inherits_its_parents_origin_and_nothing_else(self):
+        blank = FakeFrame("blank", url="about:blank")
+        page = FakePage(children=[blank])
+        page.embedded = [(blank, None)]
+        assert self.masked_frames(page) == []                                   # a child of the page itself
+        far = FakeFrame("far", url="http://elsewhere.test/")
+        inner = FakeFrame("inner", url="about:srcdoc", parent=far)               # srcdoc inside a cross-origin frame
+        page = FakePage(children=[far, inner])
+        page.embedded = [(far, None)]
+        far.embedded = [(inner, None)]
+        page.frames = [page, far, inner]
+        lp = live_page(page=page)
+        assert lp.screenshot() is not None
+        owners = [(m.owner, m.selector) for m in page.calls[0]["mask"] if ":nth" in m.selector]
+        assert ("main", "iframe, frame, embed, object:nth(0)") in owners
+
+    def test_unparseable_urls_data_urls_sandbox_and_a_frame_with_no_document_are_masked(self):
+        weird = FakeFrame("weird", url="data:text/html,hi")
+        sandboxed = FakeFrame("sand", url="http://localhost:7080/x")
+        page = FakePage(children=[weird, sandboxed])
+        page.embedded = [(weird, None), (sandboxed, ""), (sandboxed, "allow-scripts"), (sandboxed, "allow-same-origin"), (None, None)]
+        assert self.masked_frames(page) == ["(0)", "(1)", "(2)", "(4)"]
+
+    def test_a_page_whose_own_origin_is_unknown_masks_every_frame(self):
+        child = FakeFrame("c", url="http://localhost:7080/x")
+        page = FakePage(children=[child])
+        page.url = "about:blank"
+        page.embedded = [(child, None)]
+        assert self.masked_frames(page) == ["(0)"]
 
     def test_a_frame_check_that_fails_sends_nothing(self):
         page = FakePage()
+        page.embedded = [(None, None)]
 
-        def boom(script):
+        def boom(self, timeout=None):
             raise RuntimeError("detached")
-        page.locator = lambda s: type("L", (), {"evaluate_all": staticmethod(boom)})()
-        assert live_page(page=page).screenshot() is None and page.calls == []
+        FakeLocator.element_handle, keep = boom, FakeLocator.element_handle
+        try:
+            assert live_page(page=page).screenshot() is None and page.calls == []
+        finally:
+            FakeLocator.element_handle = keep
 
     def test_off_never_calls_playwright(self):
         lp = live_page(vision="off")
@@ -308,6 +362,51 @@ def test_the_default_masks_cover_card_otp_secret_named_and_cross_origin_fields_i
                          ("password in a same-origin frame", (230, 145))):
             assert pixel(data, *xy) == (0, 0, 0), name
         assert pixel(data, 60, 265) == (0, 0, 255)                   # an ordinary field is left as it is
+    finally:
+        b.close()
+        p.stop()
+
+
+def _real_page(p_b, routes, html, viewport=(400, 300)):
+    p, b = p_b
+    page = b.new_page(viewport={"width": viewport[0], "height": viewport[1]})
+    page.route("**/*", lambda r: routes(r))
+    page.goto("http://app.test/")
+    page.wait_for_timeout(400)
+    return page
+
+
+def test_a_frame_that_redirects_or_navigates_to_another_origin_is_masked_by_where_it_is_now():
+    pytest.importorskip("PIL", reason="Pillow is not installed")
+    p, b = _browser()
+    if b is None:
+        pytest.skip("no Playwright Chromium build is installed")
+    main = ("<!doctype html><body style='margin:0;background:#fff'>"
+            "<iframe id=redir src='/redir' style='position:absolute;left:0;top:0;width:150px;height:80px;border:0'></iframe>"
+            "<iframe id=nav src='/same' style='position:absolute;left:200px;top:0;width:150px;height:80px;border:0'></iframe>"
+            "<iframe id=same src='/same' style='position:absolute;left:0;top:120px;width:150px;height:80px;border:0'></iframe></body>")
+    red = "<!doctype html><body style='margin:0;background:#f00'>card</body>"
+
+    def routes(r):
+        url = r.request.url
+        if url.endswith("/redir"):
+            return r.fulfill(status=302, headers={"location": "http://other.test/card"})
+        if url.startswith("http://other.test/"):
+            return r.fulfill(content_type="text/html", body=red)
+        if url.endswith("/same"):
+            return r.fulfill(content_type="text/html", body=red)
+        return r.fulfill(content_type="text/html", body=main)
+    try:
+        page = _real_page((p, b), routes, main)
+        page.evaluate("document.getElementById('nav').contentWindow.location.href = 'http://other.test/later'")
+        page.wait_for_timeout(500)
+        lp = LivePage(HealSettings(vision="auto"), "/", "probe")
+        lp.page = page
+        shot = lp.screenshot()
+        data = base64.b64decode(shot["data"])
+        assert pixel(data, 60, 40) == (0, 0, 0)                      # src was this origin, the frame redirected away
+        assert pixel(data, 260, 40) == (0, 0, 0)                     # navigated by script after load
+        assert pixel(data, 60, 160) == (255, 0, 0)                   # a genuinely same-origin frame is left as it is
     finally:
         b.close()
         p.stop()
