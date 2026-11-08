@@ -89,7 +89,8 @@ ALLOWED_LOCATOR_METHODS = {
 }
 _LANG_KEY = re.compile(r"^[a-z]{2,3}$")
 # a CSS attribute selector that matches by prefix, suffix, substring, word or language (`[a^=x]`, `[a*=x]`, `[a$=x]`,
-# `[a~=x]`, `[a|=x]`) or reads an input's value (`[value=...]`, `[value]`): the service never writes one, so one is refused
+# `[a~=x]`, `[a|=x]`) or reads an input's value (`[value=...]`, `[value]`): the service never writes one, so one is refused.
+# A selector with a backslash (a CSS escape can spell `value` as `\\76alue`) or a `/*` comment is refused outright.
 # a selector engine or chain that reaches past plain CSS: `xpath=`, an XPath starting `//` or `..`, `internal:` engines and `>>`
 # chains: the service never writes one
 _BAD_ENGINE = re.compile(r"^\s*(?:xpath\s*=|internal:|//|\.\.)|>>", re.I)
@@ -368,8 +369,9 @@ def validate_replacement(proposed, original):
                 if not isinstance(arg, ast.Constant):
                     return None
             if isinstance(node.func, ast.Attribute) and node.func.attr == "locator":
-                for arg in node.args:
-                    if isinstance(arg.value, str) and (_BAD_SELECTOR.search(arg.value) or _BAD_ENGINE.search(arg.value)):
+                for arg in [*node.args, *(k.value for k in node.keywords)]:       # `locator(selector=...)` too
+                    if isinstance(arg.value, str) and (_BAD_SELECTOR.search(arg.value) or _BAD_ENGINE.search(arg.value)
+                                                       or "\\" in arg.value or "/*" in arg.value):
                         return None
 
         elif not isinstance(node, (ast.Name, ast.Constant, ast.Load, ast.keyword)):

@@ -206,34 +206,111 @@ def scrub_texts(yaml_text: str, texts: Any, minimum: int = 3) -> str:
 
 
 # What the service's triage reads of a failure (see the service's triage.py / failing.py): the locator Playwright prints after
-# `waiting for` or `strict mode violation:`, the call log's state waits, `locator resolved to <`, `element(s) not found`, and
-# the assertion LABELS (`Expected string`, `Received value`, `unexpected value`) that tell a wrong value from a missing element.
-_KEEP_LINE = re.compile(r"waiting for |strict mode violation|Timeout \d+ms exceeded|element\(s\) not found|Call log:|locator resolved to <|"
-                        r"unexpected value|(?:Expected|Received) (?:substring|string|pattern|value)\b")
-_RESOLVED = re.compile(r"(locator resolved to )<.*", re.S)
+# `waiting for` or `strict mode violation:` (and the state words of a wait), `locator resolved to <`, `element(s) not found`,
+# the assertion LABELS (`Expected string`, `Received value`, `unexpected value`) that tell a wrong value from a missing element,
+# and, when no printed locator is left, the locator call of a code-frame or source line (its receiver and call only).
 _LABEL = re.compile(r"(?:Expected|Received) (?:substring|string|pattern|value)\b|unexpected value")
+_HEAD = r"(?:locator|frameLocator|frame_locator|get_by_\w+|getBy\w+)"
+_PRINTED = re.compile(r"(waiting for |strict mode violation:\s*)(?=" + _HEAD + r"\()")
+_CALL_AT = re.compile(r"(?<![\w.])(?:[A-Za-z_][\w.]*\.)?" + _HEAD + r"\(")
+_CHAIN = re.compile(r"\.(?:first|last|nth|filter|locator|frameLocator|frame_locator|and_|or_|and|or|get_by_\w+|getBy\w+)\(")
+_BARE = re.compile(r"\.(?:first|last)\b(?!\()")
+_STATES = ("visible", "enabled", "editable")
 _LINE_MAX = 2000
+_EXPR_MAX = 1500
+
+
+def _balanced(text: str, i: int) -> int:
+    """Index just past the parenthesis group opening at `text[i]`, strings skipped; -1 when it never closes."""
+    depth, n, j = 0, len(text), i
+    while j < n:
+        c = text[j]
+        if c in "'\"":
+            k = j + 1
+            while k < n and text[k] != c:
+                k += 2 if text[k] == "\\" else 1
+            j = k
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+        j += 1
+    return -1
+
+
+def _expression_end(text: str, start: int) -> int:
+    """End of the locator expression that starts at `start` (a head and its narrowing chain), or `start` when it is unclosed."""
+    open_at = text.find("(", start)
+    end = _balanced(text, open_at) if open_at >= 0 else -1
+    if end < 0:
+        return start
+    while end - start < _EXPR_MAX:
+        bare = _BARE.match(text, end)
+        if bare and _CHAIN.match(text, bare.end()):
+            end = bare.end()
+        m = _CHAIN.match(text, end)
+        if not m:
+            break
+        nxt = _balanced(text, m.end() - 1)
+        if nxt < 0:
+            break
+        end = nxt
+    return min(end, start + _EXPR_MAX)
 
 
 def redact_failure_text(error: str) -> str:
-    """The failure text reduced to the lines the service's triage reads, each cut where a value would start: an assertion line
-    keeps its label (`Expected string:`) and loses what follows, a `locator resolved to <...>` keeps `<element>`, the numbered
-    element HTML of a strict-mode violation goes, and every other line (source lines of a code frame, `--showlocals`
-    variables, `Actual value:`, exception messages) is dropped. A heal still tells not drift from drift, and finds the call."""
+    """The failure text reduced to what the service's triage reads, and nothing else on a line: `waiting for <locator>` and
+    `strict mode violation: <locator> resolved to N elements` keep the locator expression (and the state words of a wait),
+    `Timeout Nms exceeded` keeps only that phrase, an assertion line keeps its label, `locator resolved to <...>` keeps
+    `<element>`; the numbered element HTML of a strict-mode violation, code-frame source lines, `--showlocals` variables,
+    `Actual value:` and exception messages are dropped. When no printed locator survives, the locator call (receiver and call
+    only, no `.fill("secret")`) of the code-frame or source lines is kept, as it is the only signal that names the call."""
     out: List[str] = []
-    for line in (error or "").splitlines():
-        line = line[:_LINE_MAX]
-        if not _KEEP_LINE.search(line):
+    calls: List[str] = []
+    printed = False
+    for raw in (error or "").splitlines():
+        line = raw[:_LINE_MAX]
+        if re.match(r"^\s*\d+\) <", line):                       # an element listing of a strict-mode violation
             continue
-        if line.lstrip().startswith(">") or re.match(r"^\s*\d+\) <", line):          # a code-frame source line, an element listing
-            continue
-        m = _RESOLVED.search(line)
+        m = _PRINTED.search(line)
         if m:
-            line = line[:m.start()] + m.group(1) + "<element>"
-        elif _LABEL.search(line) and "waiting for " not in line:
-            first = _LABEL.search(line)
-            line = line[:first.end()] + ":"
-        out.append(line)
+            end = _expression_end(line, m.end())
+            if end > m.end():
+                tail = line[end:]
+                states = [f"to be {st}" for st in _STATES if st in tail]
+                if m.group(1).startswith("strict"):
+                    n = re.search(r"resolved to (\d+) elements?", tail)
+                    out.append(f"strict mode violation: {line[m.end():end]}" + (f" resolved to {n.group(1)} elements" if n else ""))
+                else:
+                    out.append("waiting for " + line[m.end():end] + (" " + " ".join(states) if states else ""))
+                printed = True
+                continue
+        if re.search(r"waiting for ", line) and any(st in line.split("waiting for ", 1)[1] for st in _STATES):
+            out.append("waiting for " + " ".join(f"to be {st}" for st in _STATES if st in line.split("waiting for ", 1)[1]))
+            continue
+        res = re.search(r"locator resolved to <", line)
+        if res:
+            out.append(line[:res.end() - 1] + "<element>")
+            continue
+        lab = _LABEL.search(line)
+        if lab:
+            out.append(line[:lab.end()].strip() + ":")
+            continue
+        for phrase in (r"Timeout \d+ms exceeded", r"element\(s\) not found", r"Call log:"):
+            hit = re.search(phrase, line)
+            if hit:
+                out.append(hit.group(0))
+                break
+        else:
+            c = _CALL_AT.search(line)
+            if c:                                                  # a code-frame or source line: only its locator call
+                end = _expression_end(line, c.start())
+                if end > c.start():
+                    calls.append(line[c.start():end])
+    if not printed:
+        out += calls[:20]
     return "\n".join(out) + ("\n" if out else "")
 
 

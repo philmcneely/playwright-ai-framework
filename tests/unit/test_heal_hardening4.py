@@ -541,3 +541,67 @@ def test_the_live_page_records_the_content_language_the_helper_reads(tmp_path):
     from utils.heal_locale import by_language
     page.evaluate = lambda js: ["", ""]
     assert by_language(page, {"en": "EN", "fr": "FR"}) == "FR"        # the helper reaches the same branch the client checked
+
+
+# ---- selector keywords and escapes; failure-text lines cut to the expression ---------------------------------------------------
+@pytest.mark.parametrize("to", ["self.page.locator(selector='[id^=x]')", "self.page.locator(selector='xpath=//a')",
+                                "self.page.locator('[\\\\76alue=x]')", "self.page.locator('a/* c */b')", "self.page.locator('a\\\\.b')",
+                                "self.page.locator(selector='[value=x]')"])
+def test_keywords_backslashes_and_comments_in_a_selector_are_refused(to):
+    assert check_replacement(to, FROM) is not None
+
+
+def test_a_plain_keyword_selector_is_accepted():
+    assert check_replacement("self.page.locator(selector='#a')", FROM) is None
+
+
+def _case(name):
+    return CORPUS[name]
+
+
+CORPUS = {
+    "timeout": "tests/t.py:9: in t\n    login.login('u','hunter2')\npages/login_page.py:6: in login\n    self.page.locator('#username').fill(user)\n"
+               "E   TimeoutError: Locator.fill: Timeout 30000ms exceeded.\nE   Call log:\nE     - waiting for locator('#username')\n",
+    "strict": "E   Error: Locator.fill: Error: strict mode violation: locator('#username') resolved to 2 elements:\n"
+              "E       1) <input id=\"username\" value=\"hunter2\"/> aka x\nE       2) <input id=\"username\"/> aka y\n",
+    "mismatch": "E   AssertionError: Locator expected to have value 'a'\nE   Actual value: hunter2\nE   Call log:\n"
+                "E     - waiting for locator('#username')\nE     -   locator resolved to <input id=\"username\" value=\"hunter2\"/>\n"
+                "E     -   unexpected value \"hunter2\"\nE   Expected string: a\nE   Received string: hunter2\n",
+    "only_in_frame": "pages/login_page.py:6: in login\n    self.page.locator('#username').fill(user)\n"
+                     "E   TimeoutError: Timeout 30000ms exceeded.\n",
+    "frame_with_secret": "pages/login_page.py:6: in login\n    self.page.locator('#username').fill(\"hunter2\")\n>   await page.fill('#pw', 'hunter2')\n"
+                         "E   TimeoutError: Timeout 30000ms exceeded.\n",
+    "wait_state": "E   Call log:\nE     - waiting for locator('#username') to be visible\nE     -   locator resolved to hidden <input/>\n",
+    "state_word_in_selector": "E   Call log:\nE     - waiting for locator('#username')\nE     - waiting for locator('#visible-flag')\n",
+    "get_by": "E   Call log:\nE     - waiting for get_by_role(\"button\", name=\"Sign in\")\n",
+    "chain": "E   Call log:\nE     - waiting for locator('div').locator('#username').first\n",
+    "chain_filter": "E   Call log:\nE     - waiting for locator('#username').filter(has_text='a b')\n",
+    "assert_plain": "AssertionError: assert 'hunter2' == 'x'\n",
+    "not_found": "E   Error: element(s) not found\nE   Call log:\nE     - waiting for locator('#username')\n",
+    "secret_on_the_line": "E   Call log:\nE     - waiting for locator('#username') hunter2-secret-tail\n",
+}
+
+
+def test_the_failure_lines_keep_only_the_expression_and_the_cut_text_triages_as_the_whole_did():
+    triage = pytest.importorskip("heal_service.triage").triage
+    src = ("class LoginPage:\n    def __init__(self, page):\n        self.page = page\n\n    def login(self, user, pw):\n"
+           "        self.page.locator('#username').fill(user)\n        self.page.locator('#password').fill(pw)\n")
+    f = SimpleNamespace(path="pages/login_page.py", content=src, digest="d")
+    for name, err in CORPUS.items():
+        raw, cut = triage(err, [f], [("pages/login_page.py", 6)], "python"), triage(redact_failure_text(err), [f], [("pages/login_page.py", 6)], "python")
+        assert (cut.status, cut.reason, cut.call, cut.line, cut.action) == (raw.status, raw.reason, raw.call, raw.line, raw.action), name
+
+
+@pytest.mark.parametrize("name,secret", [("timeout", "hunter2"), ("strict", "hunter2"), ("mismatch", "hunter2"),
+                                         ("frame_with_secret", "hunter2"), ("secret_on_the_line", "hunter2-secret-tail")])
+def test_no_secret_survives_on_any_kept_line(name, secret):
+    assert secret not in redact_failure_text(CORPUS[name])
+
+
+def test_a_printed_locator_line_is_cut_to_its_expression_and_a_lone_frame_call_is_kept_without_its_arguments():
+    out = redact_failure_text(CORPUS["secret_on_the_line"])
+    assert out == "Call log:\nwaiting for locator('#username')\n"
+    out = redact_failure_text(CORPUS["frame_with_secret"])
+    assert "self.page.locator('#username')" in out and "fill" not in out and "hunter2" not in out
+    assert "to be visible" in redact_failure_text(CORPUS["wait_state"])
+    assert "to be visible" not in redact_failure_text(CORPUS["state_word_in_selector"])
