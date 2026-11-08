@@ -509,9 +509,9 @@ def test_in_a_real_browser_editable_text_in_an_iframe_and_a_shadow_root_does_not
     assert "Save" in aria
 
 
-# ---- N2: the helper and the client pick the same language ---------------------------------------------------------------------
+# ---- N2: the helper and the client pick the same language, from the two signals both can read in the page ----------------------------
 class SyncPage:
-    """A sync page whose <html> has no lang: only the browser locale (and a Content-Language header) can say."""
+    """A sync page whose <html> has no lang: only the browser locale can say."""
 
     def __init__(self, locale="fr-CA"):
         self.locale = locale
@@ -520,27 +520,33 @@ class SyncPage:
         return ["", self.locale]
 
 
-@pytest.mark.parametrize("locale,header,want", [("fr-CA", None, "fr"), ("", "de", "de"), ("", None, ""), ("en-US", "fr", "en")])
-def test_with_no_html_lang_the_helper_and_the_client_agree_on_the_language(locale, header, want):
+@pytest.mark.parametrize("html_lang,locale,want", [("", "fr-CA", "fr"), ("de", "fr-CA", "de"), ("", "", ""), ("", "x", ""), ("en", "", "en")])
+def test_the_helper_and_the_client_agree_on_the_language_from_html_lang_then_the_browser_locale(html_lang, locale, want):
     from utils.heal_locale import by_language, page_language
-    client_says = page_language("", locale, header)
-    page = SyncPage(locale)
-    page._heal_content_language = header                 # what LivePage.snapshot() records from the response header
+
+    class Page:
+        def evaluate(self, js):
+            return [html_lang, locale]
     branches = {"en": "EN", "fr": "FR", "de": "DE"}
-    assert client_says == want
-    assert by_language(page, branches) == (branches[want] if want in branches else "EN")
+    assert page_language(html_lang, locale) == want
+    assert by_language(Page(), branches) == (branches[want] if want in branches else "EN")
 
 
-def test_the_live_page_records_the_content_language_the_helper_reads(tmp_path):
+def test_content_language_takes_no_part_in_choosing_a_branch_on_either_side():
+    from utils.heal_locale import by_language, page_language
+    page = SyncPage("")
+    page._heal_content_language = "fr"                  # a header the helper cannot rely on seeing
+    assert page_language("", "") == ""
+    assert by_language(page, {"en": "EN", "fr": "FR"}) == "EN"
+
+
+def test_the_live_page_picks_its_language_without_the_content_language_header_and_does_not_send_it():
     page = SimpleNamespace(url=BASE + "/", evaluate=lambda js: {"page": {"lang": "", "browser_lang": ""}, "items": [], "more": 0},
                            locator=lambda sel: SimpleNamespace(aria_snapshot=lambda: ""), frames=[])
     live = hc.LivePage(HealSettings(base_url=BASE), "/", "probe")
     live.page, live._response = page, SimpleNamespace(headers={"content-language": "fr"})
-    live.snapshot()
-    assert live.language == "fr" and page._heal_content_language == "fr"
-    from utils.heal_locale import by_language
-    page.evaluate = lambda js: ["", ""]
-    assert by_language(page, {"en": "EN", "fr": "FR"}) == "FR"        # the helper reaches the same branch the client checked
+    snap = live.snapshot()
+    assert live.language == "" and snap["language"]["content_language"] is None
 
 
 # ---- selector keywords and escapes; failure-text lines cut to the expression ---------------------------------------------------
