@@ -259,7 +259,7 @@ class TestProbe:
             lambda r: httpx.Response(200, text=text))), env={"HEAL_PROBE_FROM_SERVICE": "1"})
         assert hashlib.sha256(client.probe_js().encode()).hexdigest() == hashlib.sha256(text.encode()).hexdigest()
 
-    def test_foreign_origins_are_blocked_only_while_probing(self):
+    def test_foreign_origins_are_blocked_for_the_whole_session(self):
         guard = hc.OriginGuard("http://localhost:7080")
         calls = []
 
@@ -273,12 +273,11 @@ class TestProbe:
             def continue_(self):
                 calls.append(("continue", self.request.url))
         guard.handle(Route("http://evil.example/x.png"))
-        guard.probing = True
         guard.handle(Route("http://evil.example/x.png"))
         guard.handle(Route("http://localhost:7080/app.js"))
         guard.handle(Route("http://localhost:9999/app.js"))
         guard.handle(Route("data:text/plain,hi"))
-        assert calls == [("continue", "http://evil.example/x.png"), ("abort", "http://evil.example/x.png"),
+        assert calls == [("abort", "http://evil.example/x.png"), ("abort", "http://evil.example/x.png"),
                          ("continue", "http://localhost:7080/app.js"), ("abort", "http://localhost:9999/app.js"),
                          ("continue", "data:text/plain,hi")]
 
@@ -303,7 +302,7 @@ class TestProbe:
                 return Body()
         live.page, live._response = Pg(), None
         live.snapshot()
-        assert ("evaluate", True) in seen and live.guard.probing is False
+        assert ("evaluate", True) in seen and live.guard.probing is True        # the guard is on for the whole session
 
 
 # ---- MEDIUM -----------------------------------------------------------------------------------------------------------

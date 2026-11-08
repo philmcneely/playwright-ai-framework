@@ -15,12 +15,14 @@ import io
 import json
 import struct
 import zlib
-from contextlib import contextmanager
 
 import pytest
 
-from tests.unit.test_heal_client import FAILURE, FakeLive, FakeService, Verify, healer, project, reply  # noqa: F401
+from tests.unit import test_heal_client as _base
+from tests.unit.test_heal_client import FAILURE, FakeLive, FakeService, Verify, healer, reply  # noqa: F401
 from utils.heal_client import HealSettings, LivePage, build_request, png_screenshot, vision_mode
+
+project = _base.project                                      # the shared temp-repo fixture
 
 
 def png(width=40, height=30):

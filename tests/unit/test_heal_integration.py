@@ -106,7 +106,7 @@ def make_service():
                            Endpoint(base_url="http://localhost:11434/v1", model="test-model") if model else None)
         http = TestClient(create_app(core))
         opened.append(http)
-        return ServiceClient("http://testserver", "", http), core
+        return ServiceClient("http://127.0.0.1", "", http), core
     yield build
     for client in opened:
         client.close()
@@ -127,7 +127,7 @@ def project(tmp_path, source=PAGE_PY):
 
 
 def healer(root, base_url, client, verify=lambda test: True):
-    return Healer(client, HealSettings(url="http://testserver", base_url=base_url), verify, root=root, run_id="it1")
+    return Healer(client, HealSettings(url="http://127.0.0.1", base_url=base_url), verify, root=root, run_id="it1")
 
 
 def test_fingerprint_heal_rewrites_the_locator_with_no_model_call(tmp_path, site, service):
@@ -218,7 +218,7 @@ def test_vision_auto_sends_one_masked_screenshot_and_the_service_picks_by_mark(t
                        vision_endpoint=Endpoint(base_url="http://localhost:11435/v1", model="vision-model", images_allowed=True))
     http = TestClient(create_app(core))
     try:
-        h = Healer(ServiceClient("http://testserver", "", http), HealSettings(url="http://testserver", base_url=base, vision="auto"),
+        h = Healer(ServiceClient("http://127.0.0.1", "", http), HealSettings(url="http://127.0.0.1", base_url=base, vision="auto"),
                    lambda test: True, root=root, run_id="it-vision")
         d = h.heal({"name": "test_login", "classname": "tests.test_login", "error": error_for(7, "#username")})
         assert d["outcome"] == "healed", d
@@ -243,7 +243,7 @@ def test_vision_off_sends_no_image_to_a_service_that_could_use_one(tmp_path, sit
                        vision_endpoint=Endpoint(base_url="http://localhost:11435/v1", model="vision-model", images_allowed=True))
     http = TestClient(create_app(core))
     try:
-        h = Healer(ServiceClient("http://testserver", "", http), HealSettings(url="http://testserver", base_url=base),
+        h = Healer(ServiceClient("http://127.0.0.1", "", http), HealSettings(url="http://127.0.0.1", base_url=base),
                    lambda test: True, root=root, run_id="it-off")
         d = h.heal({"name": "test_login", "classname": "tests.test_login", "error": error_for(7, "#username")})
         assert d["outcome"] == "needs_human" and model.images == [] and d["usage"]["images"] == 0
