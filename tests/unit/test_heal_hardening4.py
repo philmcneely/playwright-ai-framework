@@ -394,3 +394,34 @@ def test_a_heal_id_that_is_not_in_the_services_shape_never_becomes_a_path(bad):
         with pytest.raises(HealServiceError):
             call(bad, {})
     assert c.result("h_abc123", {}) == {}
+
+
+# ---- HEAL_ALLOW_ORIGINS -----------------------------------------------------------------------------------------------------
+@pytest.mark.parametrize("value,want", [
+    ("", ()), ("https://cdn.example", ("https://cdn.example",)),
+    ("https://cdn.example, http://fonts.example:8080  wss://ws.example", ("https://cdn.example", "http://fonts.example:8080", "wss://ws.example")),
+    ("*", ()), ("https://*.example", ()), ("https://cdn.example/path", ()), ("https://cdn.example?x=1", ()), ("cdn.example", ()),
+    ("ftp://cdn.example", ()), ("https://cdn.example:99999", ()), ("https://CDN.Example,https://cdn.example", ("https://cdn.example",)),
+    ("https://a.example;https://b.example", ()), ("https://[::1]:9000", ("https://[::1]:9000",))])
+def test_allowed_origins_are_exact_scheme_host_port_entries(value, want):
+    assert hc.parse_origins(value) == want
+    assert HealSettings.from_env({"HEAL_ALLOW_ORIGINS": value}).allow_origins == want
+
+
+def test_the_guard_lets_through_base_url_and_each_named_origin_and_nothing_wider():
+    guard = hc.OriginGuard(BASE, hc.parse_origins("https://cdn.example http://fonts.example:8080"))
+    calls = []
+
+    def go(url):
+        route = SimpleNamespace(request=SimpleNamespace(url=url), abort=lambda: calls.append("abort"),
+                                continue_=lambda: calls.append("continue"))
+        guard.handle(route)
+    for url in (BASE + "/a.js", "https://cdn.example/x.js", "http://fonts.example:8080/f.woff", "https://cdn.example:444/x.js",
+                "http://cdn.example/x.js", "https://sub.cdn.example/x.js", "https://evil.example/x.js", "http://fonts.example/f.woff"):
+        go(url)
+    assert calls == ["continue", "continue", "continue", "abort", "abort", "abort", "abort", "abort"]
+
+
+def test_the_live_page_builds_its_guard_from_the_settings():
+    live = hc.LivePage(HealSettings(base_url=BASE, allow_origins=("https://cdn.example",)), "/", "probe")
+    assert hc._origin("https://cdn.example") in live.guard.allowed and live.guard.origin == hc._origin(BASE)

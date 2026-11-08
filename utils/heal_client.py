@@ -44,6 +44,8 @@ Environment Variables:
     HEAL_TEST_ID_ATTRIBUTE: the project's test id attribute (default data-testid)
     HEAL_SOURCE_ROOTS: comma separated source roots, relative paths inside the repository (default pages,tests,utils)
     HEAL_PROBE_FROM_SERVICE: "1" to fetch the probe from the service (used only when it is byte-identical to the vendored one)
+    HEAL_ALLOW_ORIGINS: extra origins the heal browser may load from (a CDN), exact `scheme://host[:port]` entries separated by
+      commas or spaces, no wildcards (default: only BASE_URL's origin)
     HEAL_ALLOW_INSECURE: "1" to send the bearer token over http:// to a host other than localhost
     HEAL_STORAGE_STATE: Playwright storage-state file used to open the page as a signed-in user (never sent)
     BASE_URL: the app under test (default http://localhost:7080)
@@ -100,6 +102,20 @@ EDITABLE_TEXTS_JS = ("() => [...document.querySelectorAll('[contenteditable]')].
 _TRACE_LINE = re.compile(r"^\s*(\S+?\.py):(\d+)\b", re.M)
 
 
+_ORIGIN = re.compile(r"(https?|wss?)://(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?)(?::([0-9]{1,5}))?")
+
+
+def parse_origins(value: str) -> Tuple[str, ...]:
+    """HEAL_ALLOW_ORIGINS as exact origins: `scheme://host[:port]` entries separated by commas or spaces. A wildcard, a path, a
+    query or anything else is dropped, never widened: an origin is either named in full or not allowed."""
+    out = []
+    for item in re.split(r"[,\s]+", value or ""):
+        m = _ORIGIN.fullmatch(item)
+        if m and (m.group(3) is None or int(m.group(3)) <= 65535) and item.lower() not in out:
+            out.append(item.lower())
+    return tuple(out)
+
+
 # ---- settings --------------------------------------------------------------------------------------------------------
 @dataclass
 class HealSettings:
@@ -112,6 +128,7 @@ class HealSettings:
     roots: Tuple[str, ...] = ("pages", "tests", "utils")
     storage_state: Optional[str] = None
     base_url: str = "http://localhost:7080"
+    allow_origins: Tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls, env: Optional[Dict[str, str]] = None) -> "HealSettings":
@@ -122,7 +139,8 @@ class HealSettings:
                    mask=[m.strip() for m in env.get("HEAL_MASK", "").split(",") if m.strip()],
                    test_id_attribute=attr if re.fullmatch(r"[a-z][a-z0-9-]{0,63}", attr) else "data-testid",
                    roots=source_roots(env), storage_state=env.get("HEAL_STORAGE_STATE") or None,
-                   base_url=env.get("BASE_URL", "http://localhost:7080"))
+                   base_url=env.get("BASE_URL", "http://localhost:7080"),
+                   allow_origins=parse_origins(env.get("HEAL_ALLOW_ORIGINS", "")))
 
 
 # ---- the service -----------------------------------------------------------------------------------------------------
@@ -748,13 +766,14 @@ class OriginGuard:
     site. (A page's third-party scripts and fonts are therefore not loaded during a heal; the inventory is of the page's own
     content.) `active()` is kept for callers that wrap a probe in it: the guard no longer depends on it."""
 
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str, allow: Tuple[str, ...] = ()):
         self.origin = _origin(base_url)
+        self.allowed = {self.origin, *(_origin(a) for a in allow)}        # BASE_URL's origin and HEAL_ALLOW_ORIGINS, exactly
         self.probing = True
 
     def handle(self, route: Any, request: Any = None) -> None:
         url = (request or route.request).url
-        foreign = urlsplit(url).scheme.lower() in _NETWORK_SCHEMES and _origin(url) != self.origin
+        foreign = urlsplit(url).scheme.lower() in _NETWORK_SCHEMES and _origin(url) not in self.allowed
         try:
             if foreign:
                 route.abort()
@@ -776,7 +795,7 @@ class LivePage:
         self.settings, self.route, self.probe = settings, route or "/", probe
         self.inventory: List[Dict[str, Any]] = []
         self.language = ""
-        self.guard = OriginGuard(settings.base_url)
+        self.guard = OriginGuard(settings.base_url, settings.allow_origins)
         self._p = self._browser = self.page = None
 
     def __enter__(self) -> "LivePage":

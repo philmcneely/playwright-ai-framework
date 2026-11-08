@@ -395,6 +395,10 @@ skips quietly when `gh` or the service is unavailable and never fails the run. D
 ("still passing 10 runs and 30 days later") needs the service's `HEAL_RETENTION_DAYS` to
 be at least 31.
 
+The heal browser loads only from `BASE_URL`'s origin for the whole session, the first navigation included, and blocks service
+workers. If your app needs a CDN to render, name it in `HEAL_ALLOW_ORIGINS`: exact `scheme://host[:port]` origins separated by
+commas or spaces, no wildcards (`HEAL_ALLOW_ORIGINS="https://cdn.example https://fonts.example"`); anything else in the list is dropped.
+
 Optional: `HEAL_FINGERPRINTS=on` makes the test run record what each locator hit on
 a clean green run (`.heal/fingerprints.json`, git-ignored automatically), so the
 service can settle many heals with no model call. CI keeps the file between runs
