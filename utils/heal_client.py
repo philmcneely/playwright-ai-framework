@@ -162,7 +162,7 @@ class ServiceClient:
             headers = {**self.headers, "Content-Type": "application/json"} if method == "POST" else self.headers
             resp = self.http.request(method, self.base + path, headers=headers,
                                      content=json.dumps(body).encode() if body is not None else None)
-        except httpx.HTTPError as e:
+        except (httpx.HTTPError, httpx.InvalidURL) as e:
             raise HealServiceError(f"the heal service could not be reached ({type(e).__name__})") from None
         if resp.status_code >= 400:
             try:
@@ -202,12 +202,20 @@ class ServiceClient:
     def heal(self, request: Dict[str, Any]) -> Dict[str, Any]:
         return self._json(self._call("POST", "/v1/heal", request))
 
+    @staticmethod
+    def _id(heal_id: Any) -> str:
+        """A heal id as a path segment: the service's own shape (`h_` and letters or digits), matched in full, because the id
+        came from a reply or a record file and must not add a path, a query or a control character to a request."""
+        if not isinstance(heal_id, str) or not re.fullmatch(r"h_[A-Za-z0-9]{1,64}", heal_id):
+            raise HealServiceError("the heal id is not in the service's shape")
+        return heal_id
+
     def result(self, heal_id: str, report: Dict[str, Any]) -> Dict[str, Any]:
-        return self._json(self._call("POST", f"/v1/heals/{heal_id}/result", report))
+        return self._json(self._call("POST", f"/v1/heals/{self._id(heal_id)}/result", report))
 
     def followup(self, heal_id: str, report: Dict[str, Any]) -> Dict[str, Any]:
         """What happened to a healed locator after its PR (see utils/heal_followup.py)."""
-        return self._json(self._call("POST", f"/v1/heals/{heal_id}/followup", report))
+        return self._json(self._call("POST", f"/v1/heals/{self._id(heal_id)}/followup", report))
 
 
 # ---- the locator validator (a second check on everything the service sends) -------------------------------------------

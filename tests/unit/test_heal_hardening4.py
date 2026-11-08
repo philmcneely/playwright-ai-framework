@@ -385,3 +385,12 @@ def test_a_lone_surrogate_in_service_text_cannot_break_the_report(tmp_path):
     assert "\ud800" not in json.dumps(d, ensure_ascii=False)
     path = ha.write_report(d, {"test_name": "t", "path": "/p", "error_message": "e"}, tmp_path)
     assert path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("bad", ["h_abc\n", "../x", "h_", "x_abc", "h_a/b", "h_a?x=1", "", None, "h_" + "a" * 65])
+def test_a_heal_id_that_is_not_in_the_services_shape_never_becomes_a_path(bad):
+    c = ServiceClient("http://localhost:8765", "", http=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={}))))
+    for call in (c.result, c.followup):
+        with pytest.raises(HealServiceError):
+            call(bad, {})
+    assert c.result("h_abc123", {}) == {}
