@@ -14,8 +14,9 @@ COPY (an element's text, label, name, placeholder, row and its aria-label, title
 can hold personal data: a name in a table row, an account holder on a card, an address in a link. `.heal/` is git-ignored by
 default, but it is a file on disk and its content is sent to the heal service as `last_pass`. Set HEAL_FINGERPRINT_COPY=off
 to store `sha256:<hex>` of the normalized copy (case and spacing folded) instead of the copy itself. Tags, roles, ids, test
-ids and boxes stay readable. Hashed copy only matches by equality, so the service's match must compare hashed copy to hashed
-copy; until it does, copy-based proof is weaker with the switch off (identity and place proof are unaffected).
+ids and boxes stay readable. Hashed copy only matches by equality: the service hashes the copy on the drifted page the same
+way, so copy that is unchanged still proves the element, while copy that only shares words with the recorded copy does not
+(identity and place proof are unaffected).
 
 Off unless HEAL_FINGERPRINTS=on, and then it costs one small in-page call per distinct locator line per test. With it off,
 the hooks below return at once and no Playwright class is touched.
