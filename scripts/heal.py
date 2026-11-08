@@ -16,7 +16,10 @@ contains no model URL, model name, prompt or reply parsing. What it does (see ut
     - applies a patch only if its hash, path, span and replacement pass the safety checks, then re-runs the exact test and
       keeps the edit only if that test ran and passed and the service confirms
     - prints every decision with its token usage and a run total, writes heal-summary.json, and with --open-pr commits only
-      the healed files
+      the healed files and records each healed locator in .heal/heals.json
+    - on the next run, tells the service what became of every recorded heal (PR merged unchanged, edited, reverted, still
+      open or closed; whether the test failed again; runs and days since) so it can report a kept rate and durability
+      (utils/heal_followup.py; skipped quietly when `gh` or the service is unavailable)
 
 This is the on-demand half of the overnight heal->PR orchestration: run it in CI/cron after the suite, optionally with
 --open-pr to raise a single PR with the decisions and the tests it left untouched.
@@ -55,9 +58,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # `python scripts
 from utils.heal_client import (  # noqa: E402
     HealSettings, Healer, ServiceClient, run_total, validate_replacement,
 )
+from utils.heal_followup import follow_up, pr_url_from, record_heals  # noqa: E402
+
+LAST_CASES = []        # every test case of the last run_suite() (the follow-up counts runs and failures from it)
 
 __all__ = ["run_pytest", "run_suite", "verify_passed", "validate_replacement", "working_tree_dirty", "heal_failures",
-           "write_summary", "build_pr_body", "commit_lines", "md_escape", "main"]
+           "write_summary", "build_pr_body", "commit_lines", "md_escape", "follow_up_heals", "open_pr", "main"]
 
 
 def run_pytest(keyword=None):
@@ -91,8 +97,9 @@ def run_pytest(keyword=None):
 
 
 def run_suite(keyword=None):
-    """Return failing {name, classname, error} entries from a run."""
+    """Return failing {name, classname, error} entries from a run (all its cases are kept in LAST_CASES)."""
     _, cases = run_pytest(keyword)
+    LAST_CASES[:] = cases
     return [c for c in cases if c["outcome"] == "failed"]
 
 
@@ -139,7 +146,7 @@ def write_summary(decisions, started, run_id, directory=None):
     directory = Path(directory or os.getenv("HEAL_ARTIFACTS_DIR", "test_artifacts"))
     directory.mkdir(parents=True, exist_ok=True)
     counts = {k: sum(1 for d in decisions if d["outcome"] == k) for k in ("healed", "needs_human", "not_drift")}
-    summary = {"run_id": run_id, "started": started, "finished": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    summary = {"run_id": run_id, "mode": "heal", "started": started, "finished": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                "failures": len(decisions), "counts": counts, "usage": run_total(decisions), "decisions": decisions}
     path = directory / "heal-summary.json"
     tmp = path.with_suffix(".json.tmp")
@@ -220,9 +227,25 @@ def open_pr(healed, other):
                            f"fix(heal): update {len(healed)} drifted locator(s)\n\n" + "\n".join(commit_lines(healed)),
                            "--", *healed_files])
     subprocess.check_call(["git", "push", "-q", "-u", "origin", branch])
-    subprocess.check_call(["gh", "pr", "create", "--base", "main", "--head", branch,
-                           "--title", f"Locator healing -- {len(healed)} fixed, {len(other)} for review",
-                           "--body", build_pr_body(healed, other)])
+    out = subprocess.check_output(["gh", "pr", "create", "--base", "main", "--head", branch,
+                                   "--title", f"Locator healing -- {len(healed)} fixed, {len(other)} for review",
+                                   "--body", build_pr_body(healed, other)], text=True)
+    print(out.strip())
+    return pr_url_from(out)
+
+
+def follow_up_heals(service, cases, root=None):
+    """Tell the service what became of every heal recorded by an earlier --open-pr run. Never raises: this is bookkeeping."""
+    try:
+        sent = follow_up(Path(root or Path.cwd()), service, cases)
+    except Exception as e:                               # gh, the disk, the service: skip, the run goes on
+        print(f"[heal] follow-up skipped ({type(e).__name__})")
+        return []
+    for s in sent:
+        print(f"[heal] follow-up: {s['test']}: PR {s['pr_state'].replace('_', ' ')}, "
+              f"{s['runs_since']} run(s) and {s['days_since']} day(s) since the heal"
+              + (", failed again" if s["failed_again"] else ""))
+    return sent
 
 
 def main():
@@ -246,13 +269,16 @@ def main():
     started = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     run_id = uuid.uuid4().hex[:12]
     print(f"[heal] running suite{f' (-k {args.grep})' if args.grep else ''}...")
+    LAST_CASES.clear()
     fails = run_suite(args.grep)
+    service = ServiceClient(settings.url, settings.token)
+    follow_up_heals(service, list(LAST_CASES))
     if not fails:
         print("[heal] no failures -- nothing to heal.")
         return
     print(f"[heal] {len(fails)} failing test(s).")
 
-    healer = Healer(ServiceClient(settings.url, settings.token), settings, verify_passed, run_id=run_id)
+    healer = Healer(service, settings, verify_passed, run_id=run_id)
     decisions = heal_failures(fails, healer, args.max)
 
     print_decisions(decisions)
@@ -260,7 +286,12 @@ def main():
     healed = [d for d in decisions if d["outcome"] == "healed"]
     other = [d for d in decisions if d["outcome"] != "healed"]
     if args.open_pr and healed:
-        open_pr(healed, other)
+        pr_url = open_pr(healed, other)
+        try:
+            if pr_url and record_heals(Path.cwd(), healed, pr_url):
+                print("[heal] recorded the healed locators for follow-up in .heal/heals.json")
+        except Exception as e:                           # bookkeeping: the PR is already open
+            print(f"[heal] could not record the heals for follow-up ({type(e).__name__})")
     print(f"\n[heal] done: {len(healed)} healed, {len(other)} for human review. Summary: {path}")
 
 
