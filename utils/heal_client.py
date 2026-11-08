@@ -18,7 +18,7 @@ of a model reply live in this repository. The service picks the element and writ
 Features:
     ✓ HealSettings: HEAL_SERVICE_URL, HEAL_SERVICE_TOKEN, HEAL_VISION (accepted; this client never sends a screenshot),
       HEAL_MASK (accepted, unused until vision), HEAL_TEST_ID_ATTRIBUTE, HEAL_SOURCE_ROOTS, HEAL_STORAGE_STATE, BASE_URL
-    ✓ ServiceClient: capabilities, probe.js (fetched once), heal, result; every failure is a HealServiceError that names the
+    ✓ ServiceClient: capabilities, probe.js (fetched once), heal, result, followup; every failure is a HealServiceError that names the
       status and the service's reason, never the request
     ✓ Language signals: <html lang>, the browser locale and the Content-Language header of the page load
     ✓ Patch safety refusals: stale base hash, file outside the source roots or never sent, span that does not hold `from`,
@@ -196,6 +196,10 @@ class ServiceClient:
 
     def result(self, heal_id: str, report: Dict[str, Any]) -> Dict[str, Any]:
         return self._json(self._call("POST", f"/v1/heals/{heal_id}/result", report))
+
+    def followup(self, heal_id: str, report: Dict[str, Any]) -> Dict[str, Any]:
+        """What happened to a healed locator after its PR (see utils/heal_followup.py)."""
+        return self._json(self._call("POST", f"/v1/heals/{heal_id}/followup", report))
 
 
 # ---- the locator validator (a second check on everything the service sends) -------------------------------------------
@@ -482,9 +486,10 @@ def client_version(root: Path) -> str:
 
 def build_request(failure: Dict[str, Any], files: List[Dict[str, str]], stack: List[Dict[str, Any]], page: Dict[str, Any],
                   settings: HealSettings, root: Path, last_pass: Optional[Dict[str, Any]] = None,
-                  run_id: Optional[str] = None) -> Dict[str, Any]:
+                  run_id: Optional[str] = None, mode: str = "heal") -> Dict[str, Any]:
     """The POST /v1/heal body. `page` is a LivePage snapshot: path, language signals, inventory, aria, viewport.
-    No screenshot is ever included (vision is off), and no input value: the inventory comes from the probe."""
+    No screenshot is ever included (vision is off), and no input value: the inventory comes from the probe. `mode` "advise"
+    asks for the decision and the best locator with no patch (utils/heal_advise.py)."""
     req: Dict[str, Any] = {
         "client": {"framework": "playwright-ai-framework", "language": "python", "version": client_version(root)},
         "test": {"id": junit_test_id(failure.get("classname", ""), failure["name"], root), "title": failure["name"][:500]},
@@ -496,6 +501,8 @@ def build_request(failure: Dict[str, Any], files: List[Dict[str, str]], stack: L
         "test_id_attribute": settings.test_id_attribute,
         "run": {"id": run_id or uuid.uuid4().hex[:12]},
     }
+    if mode != "heal":
+        req["options"]["mode"] = mode
     req["page"]["inventory"] = clean_inventory(page["inventory"])          # allowlisted keys only, never a value
     aria = redact_typed_values(page["aria"]) if isinstance(page.get("aria"), str) else ""
     if aria and len(aria) <= LIMITS["aria_chars"]:
@@ -805,6 +812,22 @@ class LivePage:
 
 
 # ---- the heal loop ---------------------------------------------------------------------------------------------------
+def last_pass_of(root: Path, stack: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The last green run's fingerprint of the failing line (the stack's innermost frame) with the page it was on under
+    `_page`, or None when nothing was recorded for that line."""
+    if not stack:
+        return None
+    top = stack[0]
+    text = line_of(root, top["file"], top["line"])
+    store = load_store(heal_dir(root) / "fingerprints.json")
+    key = call_key(top["file"], text)
+    lp = last_pass_for(store, key) if text else None
+    if lp is None:
+        return None
+    lp["_page"] = store["entries"][key].get("page") or "/"
+    return lp
+
+
 def _expression_for(candidate: Dict[str, Any], language: str) -> Optional[str]:
     """The locator expression to check live: the candidate's code, or for branch code the branch of the page's language."""
     branches = candidate.get("branches")
@@ -860,17 +883,7 @@ class Healer:
 
     def _last_pass(self, stack: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """The last green run's fingerprint of the failing line (with the page it was on), or None."""
-        if not stack:
-            return None
-        top = stack[0]
-        text = line_of(self.root, top["file"], top["line"])
-        store = load_store(heal_dir(self.root) / "fingerprints.json")
-        key = call_key(top["file"], text)
-        lp = last_pass_for(store, key) if text else None
-        if lp is None:
-            return None
-        lp["_page"] = store["entries"][key].get("page") or "/"
-        return lp
+        return last_pass_of(self.root, stack)
 
     def _try(self, failure: Dict[str, Any], resp: Dict[str, Any], live: Any, sent: Dict[str, str],
              language: str) -> Tuple[Dict[str, Any], List[PlannedFile]]:
@@ -977,5 +990,5 @@ def run_total(decisions: List[Dict[str, Any]]) -> Dict[str, int]:
 
 
 __all__ = ["HealSettings", "HealServiceError", "ServiceClient", "Healer", "LivePage", "PatchRefused", "build_locator",
-           "build_request", "check_replacement", "collect_source", "match_ref", "plan_patches", "run_total",
+           "build_request", "check_replacement", "collect_source", "last_pass_of", "match_ref", "plan_patches", "run_total",
            "stack_from_error", "junit_test_id", "validate_replacement"]
