@@ -21,7 +21,7 @@ import pytest
 from utils import heal_advise as ha
 from utils import heal_client as hc
 from utils import heal_followup as hf
-from utils.heal_client import HealSettings, Healer, ServiceClient, check_replacement, safe_route
+from utils.heal_client import HealServiceError, HealSettings, Healer, ServiceClient, check_replacement, safe_route
 from utils.heal_redact import redact_failure_text, redact_typed_values, scrub_texts
 from tests.unit.test_heal_contract import FakeLive, FakeService, load
 
