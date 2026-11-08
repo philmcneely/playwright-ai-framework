@@ -16,6 +16,12 @@ is not used: the helper cannot see it in the test run, and the heal client picks
 Playwright page is asked directly. An async page cannot be asked from this sync function, so its language is the
 one `track_language(page)` last recorded (call it once when the page is created; the framework's `page` fixture does).
 
+Difference from the TypeScript framework: on a page with NO <html lang> this helper (and the Python heal client, which uses the
+same two signals) falls back to the browser locale (`navigator.language`), while the TypeScript helper reads only the CSS
+`html:lang()` match and so keeps the first entry. Each side is consistent with itself (the branch the client checked live is the
+branch the helper picks at run time), but the two languages do not make the same choice on such a page: give the page an
+<html lang> if you rely on the same behaviour in both.
+
 Features:
     ✓ by_language(receiver, branches): the locator of the page's language, else the first one
     ✓ page_language(html_lang, browser_locale): the plain language subtag from the two signals, in priority order

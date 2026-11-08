@@ -385,6 +385,10 @@ recorded as needs-human), `--open-pr` (assemble one PR with the per-failure
 decisions and the untouched/for-human list). It prints every decision with its
 token usage and a run total, and writes `test_artifacts/heal-summary.json`.
 
+Language branches: the Python client and the `by_language` helper choose the page language from `<html lang>`, then the
+browser locale (`navigator.language`). The TypeScript framework reads only `<html lang>`, so on a page with no `<html lang>`
+the two may pick different branches (each is consistent with its own client). Set `<html lang>` if you need the same choice in both.
+
 Optional: `HEAL_VISION=auto|on` also sends one masked viewport screenshot of the failing page,
 which the service may show to a vision model (`auto`: only when the text pick fails or is a
 close call; default `off`: no screenshot is taken and no image byte leaves). Password, card and
