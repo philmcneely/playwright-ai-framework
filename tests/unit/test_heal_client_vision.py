@@ -286,12 +286,15 @@ class TestCapture:
 
 # ---- a real browser: the mask is really painted ------------------------------------------------------------------------
 def _browser():
+    p = None
     try:
         from playwright.sync_api import sync_playwright
         p = sync_playwright().start()
         b = p.chromium.launch()
         return p, b
     except Exception:
+        if p is not None:        # a started driver left running keeps its event loop set, so a later asyncio.run() fails
+            p.stop()
         return None, None
 
 

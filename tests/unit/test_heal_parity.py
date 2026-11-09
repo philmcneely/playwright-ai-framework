@@ -214,11 +214,14 @@ def test_autocomplete_matching_is_the_one_the_typescript_client_uses():
 
 
 def _browser():
+    p = None
     try:
         from playwright.sync_api import sync_playwright
         p = sync_playwright().start()
         return p, p.chromium.launch()
     except Exception:
+        if p is not None:        # a started driver left running keeps its event loop set, so a later asyncio.run() fails
+            p.stop()
         return None, None
 
 
