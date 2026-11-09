@@ -24,12 +24,12 @@ from utils.heal_client import HealSettings
 from utils.heal_redact import INVENTORY_KEYS, clean_inventory
 
 BASE = "http://localhost:7080"
-BOOLS = ("pw_cut", "top_at_center", "copy_only", "copy_cut", "disabled", "hidden")
+BOOLS = ("pw_cut", "top_at_center", "copy_only", "copy_cut", "copy_wrap", "disabled", "hidden")
 STRINGS = ("row_attr", "pw_text", "for_attr", "row", "text")
 
 
 def test_the_new_keys_are_on_the_allowlist():
-    for key in ("row_attr", "pw_text", "pw_cut", "top_at_center", "copy_only", "copy_cut", "for_attr"):
+    for key in ("row_attr", "pw_text", "pw_cut", "top_at_center", "copy_only", "copy_cut", "copy_wrap", "for_attr"):
         assert key in INVENTORY_KEYS, key
 
 

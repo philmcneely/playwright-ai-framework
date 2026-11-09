@@ -43,10 +43,10 @@ INVENTORY_KEYS = frozenset({
     # what the service reads to prove a text locator unique and an element reachable: pw_text / pw_cut (the probe's own capped,
     # token-scrubbed copy of the text Playwright's has_text sees; it never reads a field, a select or an editable region, so it
     # is as clean as `text`), top_at_center, the copy_only / copy_cut entries of elements listed only because they hold copy,
-    # and a label's for_attr. Leaving them out made the service refuse to claim uniqueness.
-    "pw_text", "pw_cut", "top_at_center", "copy_only", "copy_cut", "for_attr",
+    # copy_wrap (a wrapper of one listed text) and a label's for_attr. Leaving them out made the service refuse to claim uniqueness.
+    "pw_text", "pw_cut", "top_at_center", "copy_only", "copy_cut", "copy_wrap", "for_attr",
 })
-_BOOL_KEYS = frozenset({"disabled", "hidden", "pw_cut", "top_at_center", "copy_only", "copy_cut"})   # true or false, nothing else
+_BOOL_KEYS = frozenset({"disabled", "hidden", "pw_cut", "top_at_center", "copy_only", "copy_cut", "copy_wrap"})   # true or false, nothing else
 _DATA_KEY = re.compile(r"^data_[a-z0-9_]{1,60}$")
 _DROP_KEY = re.compile(r"value|token|csrf|auth|session|secret|email|password|cookie", re.I)
 _BOX_KEYS = ("x", "y", "width", "height")
