@@ -92,6 +92,19 @@ the diagnosed occurrence is edited, and an edit is kept only if the exact target
 test ran *and* passed *and* the service confirms the heal. The service never sees
 input values, cookies or storage state, and this client sends **no screenshot**
 unless you turn vision on (`HEAL_VISION=auto|on`, see *Vision* below).
+
+The element inventory is cut to an allowlist before it leaves (`INVENTORY_KEYS` in
+`utils/heal_redact.py`): `tag`, `type`, `role`, `name`, `label`, `placeholder`, `text`,
+`row`, `row_attr`, `aria_label`, `title`, `alt`, `for_attr`, the test hooks and `id`,
+`class`, `name_attr`, `frame`, `shadow`, the `box`, and the probe's facts for proving a
+locator unique or reachable: `pw_text` (the probe's own capped, token-scrubbed copy of
+the text Playwright's `has_text` reads, never a field, select or editable region),
+`pw_cut`, `top_at_center`, `copy_only` and `copy_cut` (elements listed only because they
+hold copy). `disabled`, `hidden`, `pw_cut`, `top_at_center`, `copy_only` and `copy_cut`
+are kept only as booleans, every other key only as a string. The page also carries
+`inventory_more` and `inventory_copy_more`: how many elements, and how many copy-holding
+elements, the probe left out, so the service does not claim a text is unique from a
+listing that is missing some.
 `--open-pr` requires a clean working tree and commits only the healed files. For
 pages behind login, set `HEAL_STORAGE_STATE=<playwright storage-state.json>` so
 the page is opened as a signed-in user (the file stays on this machine).

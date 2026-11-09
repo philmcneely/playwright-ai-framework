@@ -50,8 +50,8 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
 
 from config.artifact_paths import AI_HEALING_REPORT_DIR
-from utils.heal_client import (HealServiceError, HealSettings, build_request, collect_source, editable_texts_async,
-                               last_pass_of, run_total, stack_from_error, vendored_probe)
+from utils.heal_client import (HealServiceError, HealSettings, build_request, collect_source, count_left_out,
+                               editable_texts_async, last_pass_of, run_total, stack_from_error, vendored_probe)
 from utils.heal_redact import clean_inventory, redact_typed_values, scrub_texts
 
 _ON = {"on", "1", "true", "yes"}
@@ -101,7 +101,8 @@ async def snapshot_page(page: Any, probe: Optional[str] = None) -> Dict[str, Any
     except Exception:
         aria = None
     view = meta.get("viewport") or {}
-    return {"path": urlsplit(page.url).path or "/", "inventory": inventory, "more": int(data.get("more") or 0), "aria": aria,
+    return {"path": urlsplit(page.url).path or "/", "inventory": inventory, "more": int(data.get("more") or 0),
+            "copy_more": count_left_out(data.get("copy_more")), "aria": aria,
             "viewport": {"w": view.get("width"), "h": view.get("height"), "dpr": meta.get("dpr")},
             "language": {"html_lang": meta.get("lang") or None, "browser_locale": meta.get("browser_lang") or None,
                          "content_language": None}}

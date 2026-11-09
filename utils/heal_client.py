@@ -192,6 +192,12 @@ _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 _NETWORK_SCHEMES = {"http", "https", "ws", "wss"}
 _BAD_CATEGORIES = {"Cc", "Cf", "Cs", "Zl", "Zp"}        # control, format (bidi), lone surrogate, line and paragraph separators
 PROBE_FILE = Path(__file__).with_name("heal_probe.js")
+MAX_LEFT_OUT = 1_000_000                                # a count of elements the probe left out is never trusted past this
+
+
+def count_left_out(value: Any) -> int:
+    """The probe's count of elements it left out (`copy_more`): a whole number >= 0, capped; anything else is 0."""
+    return min(value, MAX_LEFT_OUT) if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 # The text of the page's contenteditable regions: Playwright prints it as plain `- text:` lines in the aria snapshot, so it is
 # read here only to be cut out of that snapshot (utils/heal_redact.scrub_texts); it is never sent.
 EDITABLE_TEXTS_JS = """() => {
@@ -701,7 +707,8 @@ def build_request(failure: Dict[str, Any], files: List[Dict[str, str]], stack: L
         "failure": {"error": redact_failure_text((failure.get("error") or "")[:100_000]), "stack": stack},
         "source": {"roots": list(settings.roots), "files": files},
         "page": {"url": page["path"], "language": page["language"], "inventory": page["inventory"],
-                 "inventory_more": page["more"], "viewport": page["viewport"], "screenshot": None},
+                 "inventory_more": page["more"], "inventory_copy_more": count_left_out(page.get("copy_more")),
+                 "viewport": page["viewport"], "screenshot": None},
         "options": {"vision": "off", "max_rounds": 3, "locale_branching": True},
         "test_id_attribute": settings.test_id_attribute,
         "run": {"id": run_id or uuid.uuid4().hex[:12]},
@@ -1006,6 +1013,7 @@ class LivePage:
         view = meta.get("viewport") or {}
         scroll = meta.get("scroll") or {}
         return {"path": urlsplit(self.page.url).path or "/", "inventory": self.inventory, "more": int(data.get("more") or 0),
+                "copy_more": count_left_out(data.get("copy_more")),
                 "aria": aria, "viewport": {"w": view.get("width"), "h": view.get("height"), "dpr": meta.get("dpr")},
                 "scroll": {"x": max(0, scroll.get("x") or 0), "y": max(0, scroll.get("y") or 0)},
                 "language": {"html_lang": meta.get("lang") or None, "browser_locale": meta.get("browser_lang") or None,

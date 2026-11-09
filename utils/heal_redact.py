@@ -39,8 +39,14 @@ from typing import Any, Dict, List, Optional, Tuple
 # when the name is not a value, a credential or an address (see _DROP_KEY).
 INVENTORY_KEYS = frozenset({
     "ref", "tag", "type", "role", "name", "aria_label", "label", "placeholder", "id", "testid", "data_test", "data_qa",
-    "data_cy", "class", "name_attr", "title", "alt", "text", "disabled", "hidden", "box", "row", "frame", "shadow",
+    "data_cy", "class", "name_attr", "title", "alt", "text", "disabled", "hidden", "box", "row", "row_attr", "frame", "shadow",
+    # what the service reads to prove a text locator unique and an element reachable: pw_text / pw_cut (the probe's own capped,
+    # token-scrubbed copy of the text Playwright's has_text sees; it never reads a field, a select or an editable region, so it
+    # is as clean as `text`), top_at_center, the copy_only / copy_cut entries of elements listed only because they hold copy,
+    # and a label's for_attr. Leaving them out made the service refuse to claim uniqueness.
+    "pw_text", "pw_cut", "top_at_center", "copy_only", "copy_cut", "for_attr",
 })
+_BOOL_KEYS = frozenset({"disabled", "hidden", "pw_cut", "top_at_center", "copy_only", "copy_cut"})   # true or false, nothing else
 _DATA_KEY = re.compile(r"^data_[a-z0-9_]{1,60}$")
 _DROP_KEY = re.compile(r"value|token|csrf|auth|session|secret|email|password|cookie", re.I)
 _BOX_KEYS = ("x", "y", "width", "height")
@@ -329,8 +335,9 @@ def _clean_item(item: Any) -> Optional[Dict[str, Any]]:
                 out[key] = {k: value[k] for k in _BOX_KEYS}
             elif value is None:
                 out[key] = None
-        elif isinstance(value, bool):
-            out[key] = value
+        elif key in _BOOL_KEYS:
+            if isinstance(value, bool):
+                out[key] = value
         elif isinstance(value, str):
             out[key] = value[:_FIELD_MAX]
     return out
@@ -338,7 +345,8 @@ def _clean_item(item: Any) -> Optional[Dict[str, Any]]:
 
 def clean_inventory(items: Any) -> List[Dict[str, Any]]:
     """`items` (the probe's element list) keeping only allowlisted keys with plain values: a string (capped), a bool, or a
-    numeric box. Anything else, and every key named like a value or a credential, is dropped."""
+    numeric box. A flag key (disabled, hidden, pw_cut, ...) keeps only a real bool and every other key only a string. Anything
+    else, and every key named like a value or a credential, is dropped."""
     return [c for c in (_clean_item(i) for i in (items if isinstance(items, list) else [])) if c is not None]
 
 
