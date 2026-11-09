@@ -102,7 +102,8 @@ async def snapshot_page(page: Any, probe: Optional[str] = None) -> Dict[str, Any
         aria = None
     view = meta.get("viewport") or {}
     return {"path": urlsplit(page.url).path or "/", "inventory": inventory, "more": int(data.get("more") or 0),
-            "copy_more": count_left_out(data.get("copy_more")), "aria": aria,
+            "copy_more": count_left_out(data.get("copy_more")), "copy_withheld": count_left_out(data.get("copy_withheld")),
+            "copy_withheld_data": count_left_out(data.get("copy_withheld_data")), "aria": aria,
             "viewport": {"w": view.get("width"), "h": view.get("height"), "dpr": meta.get("dpr")},
             "language": {"html_lang": meta.get("lang") or None, "browser_locale": meta.get("browser_lang") or None,
                          "content_language": None}}

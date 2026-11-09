@@ -102,9 +102,12 @@ the text Playwright's `has_text` reads, never a field, select or editable region
 `pw_cut`, `top_at_center`, `copy_only` and `copy_cut` (elements listed only because they
 hold copy). `disabled`, `hidden`, `pw_cut`, `top_at_center`, `copy_only` and `copy_cut`
 are kept only as booleans, every other key only as a string. The page also carries
-`inventory_more` and `inventory_copy_more`: how many elements, and how many copy-holding
-elements, the probe left out, so the service does not claim a text is unique from a
-listing that is missing some.
+`inventory_more`, `inventory_copy_more`, `inventory_copy_withheld` and
+`inventory_copy_withheld_data`: how many elements, and how many copy-holding elements,
+the probe left out for want of room, and how much visible copy its filters withheld
+(addresses, digit runs, tokens), of which how much sat inside a control or data widget.
+The service uses them so it does not claim a text is unique from a listing that is
+missing some. Each is a whole number from 0 to 1,000,000; anything else is sent as 0.
 `--open-pr` requires a clean working tree and commits only the healed files. For
 pages behind login, set `HEAL_STORAGE_STATE=<playwright storage-state.json>` so
 the page is opened as a signed-in user (the file stays on this machine).

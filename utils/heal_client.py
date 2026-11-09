@@ -196,7 +196,8 @@ MAX_LEFT_OUT = 1_000_000                                # a count of elements th
 
 
 def count_left_out(value: Any) -> int:
-    """The probe's count of elements it left out (`copy_more`): a whole number >= 0, capped; anything else is 0."""
+    """A probe count of copy it left out of the listing (`copy_more`, `copy_withheld`, `copy_withheld_data`): a whole number >= 0,
+    capped at what the service accepts; anything else is 0."""
     return min(value, MAX_LEFT_OUT) if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 # The text of the page's contenteditable regions: Playwright prints it as plain `- text:` lines in the aria snapshot, so it is
 # read here only to be cut out of that snapshot (utils/heal_redact.scrub_texts); it is never sent.
@@ -708,6 +709,8 @@ def build_request(failure: Dict[str, Any], files: List[Dict[str, str]], stack: L
         "source": {"roots": list(settings.roots), "files": files},
         "page": {"url": page["path"], "language": page["language"], "inventory": page["inventory"],
                  "inventory_more": page["more"], "inventory_copy_more": count_left_out(page.get("copy_more")),
+                 "inventory_copy_withheld": count_left_out(page.get("copy_withheld")),
+                 "inventory_copy_withheld_data": count_left_out(page.get("copy_withheld_data")),
                  "viewport": page["viewport"], "screenshot": None},
         "options": {"vision": "off", "max_rounds": 3, "locale_branching": True},
         "test_id_attribute": settings.test_id_attribute,
@@ -1014,6 +1017,8 @@ class LivePage:
         scroll = meta.get("scroll") or {}
         return {"path": urlsplit(self.page.url).path or "/", "inventory": self.inventory, "more": int(data.get("more") or 0),
                 "copy_more": count_left_out(data.get("copy_more")),
+                "copy_withheld": count_left_out(data.get("copy_withheld")),
+                "copy_withheld_data": count_left_out(data.get("copy_withheld_data")),
                 "aria": aria, "viewport": {"w": view.get("width"), "h": view.get("height"), "dpr": meta.get("dpr")},
                 "scroll": {"x": max(0, scroll.get("x") or 0), "y": max(0, scroll.get("y") or 0)},
                 "language": {"html_lang": meta.get("lang") or None, "browser_locale": meta.get("browser_lang") or None,

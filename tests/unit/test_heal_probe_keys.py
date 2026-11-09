@@ -77,6 +77,21 @@ def test_a_page_without_copy_more_sends_zero(tmp_path):
     assert _request(_page(), tmp_path)["page"]["inventory_copy_more"] == 0
 
 
+COUNTS = [(5, 5), (0, 0), (None, 0), ("x", 0), (-3, 0), (True, 0), (2.5, 0), (10**12, 1_000_000)]
+
+
+@pytest.mark.parametrize("field", ["copy_withheld", "copy_withheld_data"])
+def test_the_request_carries_the_withheld_counts(field, tmp_path):
+    assert _request(_page(**{field: 9}), tmp_path)["page"]["inventory_" + field] == 9
+    assert _request(_page(), tmp_path)["page"]["inventory_" + field] == 0
+
+
+@pytest.mark.parametrize("field", ["copy_more", "copy_withheld", "copy_withheld_data"])
+@pytest.mark.parametrize("raw,want", COUNTS)
+def test_the_request_clamps_every_left_out_count(field, raw, want, tmp_path):
+    assert _request(_page(**{field: raw}), tmp_path)["page"]["inventory_" + field] == want
+
+
 def test_the_request_carries_the_new_item_keys(tmp_path):
     item = {"ref": "e0", "tag": "span", "text": "Pending", "pw_text": "Pending", "pw_cut": False, "top_at_center": True,
             "copy_only": True, "copy_cut": True, "for_attr": "email", "row_attr": "data-qa", "row": "r1"}
@@ -116,11 +131,19 @@ def _live(data):
     return live
 
 
-@pytest.mark.parametrize("raw,want", [(5, 5), (0, 0), (None, 0), ("x", 0), (-3, 0), (True, 0), (2.5, 0), (10**12, 1_000_000)])
-def test_the_live_page_forwards_copy_more_as_a_capped_count(raw, want):
-    data = {"page": {}, "items": [], "more": 0, "copy_more": raw}
-    assert _live(data).snapshot()["copy_more"] == want
-    assert asyncio.run(ha.snapshot_page(_AsyncPage(data)))["copy_more"] == want
+@pytest.mark.parametrize("field", ["copy_more", "copy_withheld", "copy_withheld_data"])
+@pytest.mark.parametrize("raw,want", COUNTS)
+def test_the_live_page_forwards_each_left_out_count_as_a_capped_count(field, raw, want):
+    data = {"page": {}, "items": [], "more": 0, field: raw}
+    assert _live(data).snapshot()[field] == want
+    assert asyncio.run(ha.snapshot_page(_AsyncPage(data)))[field] == want
+
+
+def test_the_counts_are_independent_and_reach_the_request(tmp_path):
+    data = {"page": {}, "items": [], "more": 0, "copy_more": 1, "copy_withheld": 2, "copy_withheld_data": 3}
+    for snap in (_live(data).snapshot(), asyncio.run(ha.snapshot_page(_AsyncPage(data)))):
+        page = _request(snap, tmp_path)["page"]
+        assert (page["inventory_copy_more"], page["inventory_copy_withheld"], page["inventory_copy_withheld_data"]) == (1, 2, 3)
 
 
 def test_the_live_page_keeps_more_as_it_was():
@@ -166,5 +189,5 @@ def test_the_vendored_probe_is_byte_identical_to_the_service_probe():
 
 def test_the_vendored_probe_lists_the_keys_the_client_allows():
     text = hc.PROBE_FILE.read_text(encoding="utf-8")
-    for key in ("copy_more", "copy_only", "copy_cut", "for_attr", "pw_text", "pw_cut", "top_at_center", "row_attr"):
+    for key in ("copy_more", "copy_withheld", "copy_withheld_data", "copy_only", "copy_cut", "for_attr", "pw_text", "pw_cut", "top_at_center", "row_attr"):
         assert key in text, key
