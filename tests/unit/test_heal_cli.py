@@ -167,6 +167,19 @@ class TestLaterRounds:
         assert [bool(d.get("still_failing")) for d in out] == [False, True, False]
         assert "no element could be the one" in out[1]["still_failing_why"]
 
+    def test_a_chained_round_that_raises_is_recorded_and_the_earlier_heal_stays(self, tmp_path):
+        class Boom(FakeHealer):
+            def heal(self, failure):
+                if len(self.seen) == 1:                                    # the second call: the chained round
+                    self.seen.append(failure["name"])
+                    raise ConnectionError("service lost")
+                return super().heal(failure)
+        out = heal.heal_failures(FAILS[:2], Boom([LATER, HUMAN]), 10, verify=lambda f: False)
+        assert [(d["test"], d["outcome"]) for d in out] == [("test_0", "healed"), ("test_0", "needs_human"),
+                                                           ("test_1", "needs_human")]
+        assert out[1]["reason"] == "chain_error" and "service lost" in out[1]["why"] and out[0]["still_failing"]
+        assert json.loads(heal.write_summary(out, "t0", "run1", tmp_path).read_text())["kept_still_failing"] == 1
+
     def test_a_first_heal_that_fails_is_not_marked(self):
         out = heal.heal_failures(FAILS[:1], FakeHealer([HUMAN]), 10)
         assert out == [{"test": "test_0", **HUMAN}]

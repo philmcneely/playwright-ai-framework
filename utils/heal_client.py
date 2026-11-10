@@ -75,6 +75,7 @@ import json
 import os
 import io
 import re
+import signal
 import stat
 import struct
 import tokenize
@@ -1096,6 +1097,23 @@ class LivePage:
 
 
 # ---- the heal loop ---------------------------------------------------------------------------------------------------
+@contextmanager
+def _term_as_interrupt() -> Iterator[None]:
+    """While an edit is on disk, SIGTERM raises KeyboardInterrupt (so the caller's revert runs); the old handler comes back
+    after. Signals can only be set from the main thread; anywhere else this does nothing."""
+    def stop(signum, frame):
+        raise KeyboardInterrupt(f"signal {signum}")
+    try:
+        old = signal.signal(signal.SIGTERM, stop)
+    except (ValueError, OSError):
+        yield
+        return
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, old)
+
+
 def last_pass_of(root: Path, stack: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """The last green run's fingerprint of the failing line (the stack's innermost frame) with the page it was on under
     `_page`, or None when nothing was recorded for that line."""
@@ -1219,25 +1237,26 @@ class Healer:
             return {**resp, "status": "needs_human", "reason": "patch_refused",
                     "why": f"the client refused the patch: {e.reason}"}, []
         try:
-            write_files(self.root, planned)                    # inside the try: a partial multi-file write is reverted
-            rerun = self.verify(failure)                       # a bool, or (passed, the re-run's failure)
-            passed, after = rerun if isinstance(rerun, tuple) else (bool(rerun), None)
-            later = None if passed else self._later(after, planned)
-            if not passed and later is None:
-                revert_files(self.root, planned)
-            report: Dict[str, Any] = {"count": 1, "hit": {"ref": ref},
-                                      "test_outcome": "passed" if passed else "failed_later" if later else "failed"}
-            if later:
-                report["later"] = later                        # the edit stays on disk until the service has answered
-            nxt = self._report(heal_id, report)
+            with _term_as_interrupt():                         # SIGTERM reverts like Ctrl-C while an edit is on disk
+                write_files(self.root, planned)                # inside the try: a partial multi-file write is reverted
+                rerun = self.verify(failure)                   # a bool, or (passed, the re-run's failure)
+                passed, after = rerun if isinstance(rerun, tuple) else (bool(rerun), None)
+                later = None if passed else self._later(after, planned)
+                if not passed and later is None:
+                    revert_files(self.root, planned)
+                report: Dict[str, Any] = {"count": 1, "hit": {"ref": ref}, "test_outcome":
+                                          "passed" if passed else "failed_later" if later else "failed"}
+                if later:
+                    report["later"] = later                    # the edit stays on disk until the service has answered
+                nxt = self._report(heal_id, report)
+                if (passed or later) and nxt.get("status") == "healed":
+                    return ({**nxt, "later_failure": after} if later else nxt), planned
+                if passed or later:                            # the service did not confirm it: do not keep it
+                    revert_files(self.root, planned)
+                return nxt, []
         except BaseException:
-            revert_files(self.root, planned)                   # a write or verify crash or a lost service: never keep the edit
+            revert_files(self.root, planned)                   # a crash, a lost service, Ctrl-C or SIGTERM: never keep the edit
             raise
-        if (passed or later) and nxt.get("status") == "healed":
-            return ({**nxt, "later_failure": after} if later else nxt), planned
-        if passed or later:                                    # the service did not confirm it: do not keep it
-            revert_files(self.root, planned)
-        return nxt, []
 
     def _later(self, failure: Optional[Dict[str, Any]], planned: List[PlannedFile]) -> Optional[Dict[str, Any]]:
         """The `later` facts of a re-run that did not pass when it stopped somewhere other than a line this patch wrote
@@ -1250,7 +1269,9 @@ class Healer:
         edited = next((pf for pf in planned if pf.rel == top["file"]), None)
         if edited and top["line"] in _written_lines(edited):
             return None
-        later: Dict[str, Any] = {"error": redact_failure_text((failure.get("error") or "")[:100_000])[:4000], "line": top["line"]}
+        # the stack lets the service prove the re-run got past the original failure; it is the request's frame list
+        later: Dict[str, Any] = {"error": redact_failure_text((failure.get("error") or "")[:100_000])[:4000],
+                                 "line": top["line"], "stack": stack[:100]}
         if len(top["file"]) <= 500:
             later["file"] = top["file"]
         return later

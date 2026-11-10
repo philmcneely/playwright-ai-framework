@@ -139,7 +139,13 @@ def heal_test(failure, healer, decisions, healed):
     """
     kept_last, rounds = None, 0
     while True:
-        d = healer.heal(failure)
+        try:
+            d = healer.heal(failure)
+        except Exception as e:                         # a chained round must not take the run down: the earlier heals stay
+            if kept_last is None:
+                raise
+            d = {"test": failure["name"], "outcome": "needs_human", "reason": "chain_error", "usage": {},
+                 "why": f"the next round failed ({type(e).__name__}): {str(e)[:200]}"}
         later = d.pop("later_failure", None)           # the re-run's traceback is for the next round, not the record
         decisions.append(d)
         if kept_last is not None and d["outcome"] != "healed":

@@ -574,7 +574,8 @@ class TestFailedLater:
         d, svc, verify, text = self.run(project, (False, failure),
                                         reply("healed", candidate(project), reason="later_locator"))
         assert svc.posts("/result") == [{"count": 1, "hit": {"ref": "e0"}, "test_outcome": "failed_later", "later": {
-            "error": redact_failure_text(failure["error"]), "file": "pages/login_page.py", "line": 11}}]
+            "error": redact_failure_text(failure["error"]), "file": "pages/login_page.py", "line": 11,
+            "stack": [{"file": "pages/login_page.py", "line": 11}, {"file": "tests/test_login.py", "line": 2}]}}]
         assert d["outcome"] == "healed" and d["reason"] == "later_locator" and TO in text
         assert d["later_failure"] == failure                       # the next round heals this failure
 
@@ -621,6 +622,26 @@ class TestFailedLater:
         _, svc, *_ = self.run(project, False, reply("needs_human", reason="failed_rerun", why="x"))
         assert svc.posts("/result")[0] == {"count": 1, "hit": {"ref": "e0"}, "test_outcome": "failed"}
 
+    def test_the_stack_is_the_frame_list_a_heal_request_carries_innermost_first(self, project):
+        failure = later_error()
+        _, svc, *_ = self.run(project, (False, failure), reply("healed", candidate(project), reason="later_locator"))
+        later = svc.posts("/result")[0]["later"]
+        assert later["stack"] == stack_from_error(failure["error"], HealSettings(url="x").roots, project)
+        assert (later["file"], later["line"]) == (later["stack"][0]["file"], later["stack"][0]["line"])
+
+    def test_the_stack_is_capped_at_100_frames(self, project):
+        frames = "".join(f"pages/login_page.py:{n}: in f\n    x\n" for n in range(20, 170))
+        failure = {"name": "test_valid_login", "classname": "tests.test_login", "outcome": "failed",
+                   "error": frames + "E   TimeoutError: waiting for locator('#other')\n"}
+        _, svc, *_ = self.run(project, (False, failure), reply("needs_human", reason="failed_rerun", why="x"))
+        later = svc.posts("/result")[0]["later"]
+        assert len(later["stack"]) == 100 and later["stack"][0] == {"file": "pages/login_page.py", "line": 169}
+
+    def test_a_failure_with_no_frames_under_the_roots_sends_no_later(self, project):
+        outside = {"name": "t", "classname": "c", "outcome": "failed", "error": "conftest.py:3: in fixture\nE   boom\n"}
+        _, svc, *_ = self.run(project, (False, outside), reply("needs_human", reason="failed_rerun", why="x"))
+        assert svc.posts("/result") == [{"count": 1, "hit": {"ref": "e0"}, "test_outcome": "failed"}]
+
     def test_the_later_error_is_capped_at_4000_characters(self, project):
         _, svc, *_ = self.run(project, (False, later_error(message="\n".join(["Timeout 30000ms exceeded."] * 400))),
                               reply("needs_human", reason="failed_rerun", why="x"))
@@ -648,6 +669,33 @@ class TestFailedLater:
         assert first["outcome"] == "healed" and second["outcome"] == "healed" and TO in text and to2 in text and FROM not in text
         assert svc.posts("/v1/heal")[1]["failure"]["stack"][0] == {"file": "pages/login_page.py", "line": 11}
         assert [b["test_outcome"] for b in svc.posts("/result")] == ["failed_later", "passed"]
+
+    @pytest.mark.parametrize("verify_result", [(False, later_error()), True])
+    def test_ctrl_c_while_the_service_answer_is_pending_reverts_the_edit(self, project, verify_result):
+        svc = FakeService(reply("try", candidate(project)))
+        orig = svc.handler
+
+        def interrupted(request):
+            if request.url.path.endswith("/result"):
+                assert TO in (project / "pages/login_page.py").read_text()      # the edit is on disk while it waits
+                raise KeyboardInterrupt
+            return orig(request)
+        svc.handler = interrupted
+        with pytest.raises(KeyboardInterrupt):
+            healer(project, svc, Verify(verify_result, root=project)).heal(FAILURE)
+        assert (project / "pages/login_page.py").read_text() == PAGE_SRC
+
+    def test_sigterm_during_the_rerun_reverts_the_edit_and_restores_the_handler(self, project):
+        import os
+        import signal
+        before = signal.getsignal(signal.SIGTERM)
+
+        def killed(test):
+            os.kill(os.getpid(), signal.SIGTERM)
+            return True
+        with pytest.raises(KeyboardInterrupt):
+            healer(project, FakeService(reply("try", candidate(project))), killed).heal(FAILURE)
+        assert (project / "pages/login_page.py").read_text() == PAGE_SRC and signal.getsignal(signal.SIGTERM) is before
 
 
 def test_written_lines_follow_an_added_import_and_a_replaced_line():
