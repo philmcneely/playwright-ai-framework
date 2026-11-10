@@ -69,6 +69,7 @@ Author: PMAC
 """
 import ast
 import base64
+import difflib
 import hashlib
 import json
 import os
@@ -806,6 +807,18 @@ def plan_patches(candidate: Dict[str, Any], sent: Dict[str, str], roots: Tuple[s
 _LINE = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
 
 
+def _written_lines(pf: PlannedFile) -> set:
+    """The 1-based line numbers, in the edited file, of every line the patches changed or added (a traceback of the re-run
+    counts lines of the edited file, and an added helper import shifts them)."""
+    before = _LINE.findall(pf.original.decode("utf-8", "replace"))
+    after = _LINE.findall(pf.new_text)
+    lines: set = set()
+    for tag, _, _, j1, j2 in difflib.SequenceMatcher(None, before, after, autojunk=False).get_opcodes():
+        if tag != "equal":
+            lines.update(range(j1 + 1, j2 + 1))
+    return lines
+
+
 def _expression_spans(text: str) -> Optional[set]:
     """{(start, end)} character spans of every expression node of `text`, or None when it does not parse. ast columns are
     UTF-8 byte offsets within a line; they are turned into offsets in `text` here."""
@@ -1109,8 +1122,8 @@ def _expression_for(candidate: Dict[str, Any], language: str) -> Optional[str]:
 
 class Healer:
     """Heals one failing test at a time through the service. All collaborators are injected, so a test can drive the whole
-    loop with a fake service and a fake page: `verify(test) -> bool` re-runs the exact test, `live_factory(route, probe)`
-    opens the page."""
+    loop with a fake service and a fake page: `verify(test)` re-runs the exact test and returns a bool, or `(passed, failure)`
+    with the re-run's failure so a failure LATER than the patch can be reported; `live_factory(route, probe)` opens the page."""
 
     def __init__(self, service: ServiceClient, settings: HealSettings, verify: Callable[[Dict[str, Any]], bool],
                  root: Optional[Path] = None, live_factory: Optional[Callable[[str, str], Any]] = None,
@@ -1207,19 +1220,40 @@ class Healer:
                     "why": f"the client refused the patch: {e.reason}"}, []
         try:
             write_files(self.root, planned)                    # inside the try: a partial multi-file write is reverted
-            passed = bool(self.verify(failure))
-            if not passed:
+            rerun = self.verify(failure)                       # a bool, or (passed, the re-run's failure)
+            passed, after = rerun if isinstance(rerun, tuple) else (bool(rerun), None)
+            later = None if passed else self._later(after, planned)
+            if not passed and later is None:
                 revert_files(self.root, planned)
-            nxt = self._report(heal_id, {"count": 1, "hit": {"ref": ref},
-                                         "test_outcome": "passed" if passed else "failed"})
+            report: Dict[str, Any] = {"count": 1, "hit": {"ref": ref},
+                                      "test_outcome": "passed" if passed else "failed_later" if later else "failed"}
+            if later:
+                report["later"] = later                        # the edit stays on disk until the service has answered
+            nxt = self._report(heal_id, report)
         except BaseException:
             revert_files(self.root, planned)                   # a write or verify crash or a lost service: never keep the edit
             raise
-        if passed and nxt.get("status") == "healed":
-            return nxt, planned
-        if passed:                                             # the service did not confirm it: do not keep it
+        if (passed or later) and nxt.get("status") == "healed":
+            return ({**nxt, "later_failure": after} if later else nxt), planned
+        if passed or later:                                    # the service did not confirm it: do not keep it
             revert_files(self.root, planned)
         return nxt, []
+
+    def _later(self, failure: Optional[Dict[str, Any]], planned: List[PlannedFile]) -> Optional[Dict[str, Any]]:
+        """The `later` facts of a re-run that did not pass when it stopped somewhere other than a line this patch wrote
+        (another line, or another file); None when it stopped on a patched line or its place cannot be told. Only the
+        place is judged here: whether it is a new locator that found nothing is the service's call."""
+        stack = stack_from_error((failure or {}).get("error") or "", self.settings.roots, self.root)
+        if not stack:
+            return None
+        top = stack[0]                                          # the innermost frame under the source roots
+        edited = next((pf for pf in planned if pf.rel == top["file"]), None)
+        if edited and top["line"] in _written_lines(edited):
+            return None
+        later: Dict[str, Any] = {"error": redact_failure_text((failure.get("error") or "")[:100_000])[:4000], "line": top["line"]}
+        if len(top["file"]) <= 500:
+            later["file"] = top["file"]
+        return later
 
     @staticmethod
     def _check_also_patches(cand: Dict[str, Any], live: Any, language: str, expected: Optional[str]) -> None:
@@ -1255,6 +1289,8 @@ class Healer:
             out.update(outcome="healed", file=p["file"], to=p["to"], strategy=resp["candidate"].get("strategy"),
                        tier_movement=resp["candidate"].get("tier_movement"), why=resp["candidate"].get("why"),
                        files=[pf.rel for pf in kept])
+            if resp.get("later_failure"):                          # kept because the test stopped at a later locator
+                out["later_failure"] = resp["later_failure"]
             out["from"] = p["from"]
             out["source"] = f"heal service (settled at step {resp.get('settled_at')})"
         elif status == "not_drift":

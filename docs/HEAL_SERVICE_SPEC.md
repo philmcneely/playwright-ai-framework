@@ -175,6 +175,8 @@ HTTP + JSON, versioned under `/v1`. One heal is a short conversation: the client
 
 Before it edits anything, the client checks the candidate in the live page: `count` must be 1 and the hit must be `expect.ref`. Then it applies `patch` only if all of these hold: the file's current hash equals `base_sha256`, the file is under `source.roots`, the span holds exactly `from`, and `to` passes the framework's existing locator validator (`validate_replacement` / `validReplacement`). It re-runs the exact test and reports. A count other than 1, a different element, or a failed re-run makes the client revert and the service move to the next candidate, up to `max_rounds`, then `needs_human`.
 
+When the re-run fails on a line other than the patched one, the Python client reports `"test_outcome": "failed_later"` with `"later": {"error": "<redacted, up to 4000 chars>", "file": "<repo-relative>", "line": N}` and keeps the edit on disk until the service answers; it keeps it only on `healed` (reason `later_locator`) and then heals the next failure in a new conversation.
+
 ## Heal pipeline and gates
 
 Each heal climbs a cost ladder and stops at the first step that settles it. A model is called only when code can't decide, and the model picks an element from a short list. It never writes locator text.

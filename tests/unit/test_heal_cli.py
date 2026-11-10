@@ -79,14 +79,40 @@ class TestVerifyPassed:
         assert not heal.verify_passed(self.T, self._runner(0, [bad]))
 
 
+class TestVerifyRun:
+    T = {"name": "test_a", "classname": "tests.t"}
+    OK = {"name": "test_a", "classname": "tests.t", "outcome": "passed", "error": ""}
+    BAD = {"name": "test_a", "classname": "tests.t", "outcome": "failed", "error": "pages/p.py:11: in x\nE   boom"}
+
+    def _runner(self, rc, cases):
+        return lambda keyword: (rc, cases)
+
+    def test_a_pass_has_no_failure(self):
+        assert heal.verify_run(self.T, self._runner(0, [self.OK])) == (True, None)
+
+    def test_a_failed_rerun_returns_that_failure_in_the_shape_of_a_failing_test(self):
+        passed, failure = heal.verify_run(self.T, self._runner(1, [self.BAD]))
+        assert passed is False and failure == self.BAD
+
+    def test_it_is_as_strict_as_verify_passed(self):
+        for rc, cases in [(5, []), (0, []), (1, [self.OK]), (0, [{**self.OK, "name": "test_other"}])]:
+            assert heal.verify_run(self.T, self._runner(rc, cases)) == (False, None)
+            assert heal.verify_passed(self.T, self._runner(rc, cases)) is False
+
+    def test_another_test_failing_is_not_this_tests_failure(self):
+        other = {**self.BAD, "name": "test_other"}
+        assert heal.verify_run(self.T, self._runner(1, [self.OK, other])) == (False, None)
+
+
 class FakeHealer:
     """Stands in for utils.heal_client.Healer: one scripted decision per failure."""
 
     def __init__(self, decisions):
-        self.decisions, self.seen = list(decisions), []
+        self.decisions, self.seen, self.failures = list(decisions), [], []
 
     def heal(self, failure):
         self.seen.append(failure["name"])
+        self.failures.append(failure)
         return {"test": failure["name"], **self.decisions.pop(0)}
 
 
@@ -113,6 +139,59 @@ class TestHealFailures:
         assert reruns == ["test_1", "test_2"] and healer.seen == ["test_0", "test_2"]
         assert out[1]["outcome"] == "healed" and "same fix as test_0" in out[1]["source"]
         assert out[2]["outcome"] == "needs_human"
+
+
+LATER = {**HEALED, "reason": "later_locator", "usage": {"calls": 1, "input_tokens": 50, "output_tokens": 4, "images": 0},
+         "later_failure": {"name": "test_0", "classname": "tests.t", "outcome": "failed", "error": "stopped later"}}
+
+
+class TestLaterRounds:
+    def test_a_heal_kept_for_a_later_locator_heals_the_same_test_again_from_the_new_failure(self):
+        healer = FakeHealer([LATER, HEALED])
+        out = heal.heal_failures(FAILS[:1], healer, 10)
+        assert healer.seen == ["test_0", "test_0"] and healer.failures[1]["error"] == "stopped later"
+        assert [d["outcome"] for d in out] == ["healed", "healed"] and not any("still_failing" in d for d in out)
+        assert not any("later_failure" in d for d in out)               # the traceback is not kept in the decisions
+
+    def test_a_chain_is_capped_and_the_last_heal_says_the_test_still_fails_later(self):
+        healer = FakeHealer([LATER] * 10)
+        out = heal.heal_failures(FAILS[:1], healer, 10)
+        assert heal.LATER_ROUNDS == 3 and len(out) == 1 + heal.LATER_ROUNDS == len(healer.seen)
+        assert [bool(d.get("still_failing")) for d in out] == [False, False, False, True]
+        assert "3 further" in out[-1]["still_failing_why"]
+
+    def test_a_chain_that_ends_in_a_failure_keeps_the_earlier_heals_and_marks_the_last_kept_one(self):
+        healer = FakeHealer([LATER, LATER, HUMAN])
+        out = heal.heal_failures(FAILS[:1], healer, 10)
+        assert [d["outcome"] for d in out] == ["healed", "healed", "needs_human"]
+        assert [bool(d.get("still_failing")) for d in out] == [False, True, False]
+        assert "no element could be the one" in out[1]["still_failing_why"]
+
+    def test_a_first_heal_that_fails_is_not_marked(self):
+        out = heal.heal_failures(FAILS[:1], FakeHealer([HUMAN]), 10)
+        assert out == [{"test": "test_0", **HUMAN}]
+
+    def test_rounds_do_not_use_up_max_and_the_next_test_goes_on_after_a_chain(self):
+        healer = FakeHealer([LATER, HEALED, HUMAN])
+        out = heal.heal_failures(FAILS[:2], healer, 2, verify=lambda f: False)
+        assert healer.seen == ["test_0", "test_0", "test_1"] and len(out) == 3
+
+    def test_the_summary_counts_tests_not_rounds_and_the_pr_lists_the_still_failing(self, tmp_path):
+        out = heal.heal_failures(FAILS[:1], FakeHealer([LATER, HUMAN]), 10)
+        data = json.loads(heal.write_summary(out, "t0", "run1", tmp_path).read_text())
+        assert data["failures"] == 1 and data["kept_still_failing"] == 1 and len(data["decisions"]) == 2
+        healed = [d for d in out if d["outcome"] == "healed"]
+        body = heal.build_pr_body(healed, [d for d in out if d["outcome"] != "healed"])
+        note = body.split("## Kept, test still fails later")[1].split("\n\n##")[0]
+        assert "test\\_0" in note and "no element could be the one" in note
+
+    def test_the_pr_has_no_such_section_without_a_still_failing_heal(self):
+        assert "still fails later" not in heal.build_pr_body([{"test": "a", **HEALED}], [])
+
+    def test_the_decision_line_says_the_test_still_fails_later(self, capsys):
+        out = heal.heal_failures(FAILS[:1], FakeHealer([LATER, HUMAN]), 10)
+        heal.print_decisions(out)
+        assert "kept, test still fails later" in capsys.readouterr().out
 
 
 class TestSummaryAndOutput:
