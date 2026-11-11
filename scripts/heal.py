@@ -15,6 +15,8 @@ contains no model URL, model name, prompt or reply parsing. What it does (see ut
     - checks each candidate in the live page (exactly one match, the expected element) before editing anything
     - applies a patch only if its hash, path, span and replacement pass the safety checks, then re-runs the exact test and
       keeps the edit only if that test ran and passed and the service confirms
+    - when the exact test passes its healed line but then fails at a different locator, reports that to the service and, if
+      it confirms, keeps the edit and heals the next failure (up to LATER_ROUNDS more); a test left failing later is marked still_failing for review
     - prints every decision with its token usage and a run total, writes heal-summary.json, and with --open-pr commits only
       the healed files and records each healed locator in .heal/heals.json
     - on the next run, tells the service what became of every recorded heal (PR merged unchanged, edited, reverted, still
@@ -62,8 +64,9 @@ from utils.heal_client import (  # noqa: E402
 from utils.heal_followup import follow_up, pr_url_from, record_heals  # noqa: E402
 
 LAST_CASES = []        # every test case of the last run_suite() (the follow-up counts runs and failures from it)
+LATER_ROUNDS = 3       # further heals of one test after its first, each for the next locator it stops at
 
-__all__ = ["run_pytest", "run_suite", "verify_passed", "validate_replacement", "working_tree_dirty", "heal_failures",
+__all__ = ["run_pytest", "run_suite", "verify_run", "verify_passed", "validate_replacement", "working_tree_dirty", "heal_failures",
            "write_summary", "build_pr_body", "commit_lines", "md_escape", "follow_up_heals", "open_pr", "main"]
 
 
@@ -104,14 +107,21 @@ def run_suite(keyword=None):
     return [c for c in cases if c["outcome"] == "failed"]
 
 
-def verify_passed(test, runner=run_pytest):
+def verify_run(test, runner=run_pytest):
     """
-    True only if the exact target test ran AND passed AND pytest exited cleanly.
-    An empty selection, collection error or missing report is NOT a pass.
+    (passed, failure) for a re-run of the exact target test. `passed` is True only if that test ran AND passed AND pytest
+    exited cleanly; an empty selection, collection error or missing report is NOT a pass. `failure` is the target's failed
+    case ({name, classname, outcome, error}, as run_suite returns them) or None when it passed or never ran to a failure.
     """
     returncode, cases = runner(test["name"].split("[", 1)[0])
     ran = [c for c in cases if c["name"] == test["name"] and c["classname"] == test.get("classname")]
-    return returncode == 0 and bool(ran) and all(c["outcome"] == "passed" for c in ran)
+    passed = returncode == 0 and bool(ran) and all(c["outcome"] == "passed" for c in ran)
+    return passed, None if passed else next((c for c in ran if c["outcome"] == "failed"), None)
+
+
+def verify_passed(test, runner=run_pytest):
+    """True only if the exact target test ran AND passed AND pytest exited cleanly (see verify_run)."""
+    return verify_run(test, runner)[0]
 
 
 def working_tree_dirty():
@@ -120,10 +130,47 @@ def working_tree_dirty():
     return bool(out.strip())
 
 
+def heal_test(failure, healer, decisions, healed):
+    """
+    Heal one failing test, recording each heal as its own decision. A heal the service kept because the test then stopped
+    at a different locator (reason later_locator) is followed by another heal of the next failure, up to LATER_ROUNDS more.
+    When the chain ends on something that cannot be healed, the earlier heals stay kept and the last kept one is marked
+    still_failing, so a person reviews that test.
+    """
+    kept_last, rounds = None, 0
+    while True:
+        try:
+            d = healer.heal(failure)
+        except Exception as e:                         # a chained round must not take the run down: the earlier heals stay
+            if kept_last is None:
+                raise
+            d = {"test": failure["name"], "outcome": "needs_human", "reason": "chain_error", "usage": {},
+                 "why": f"the next round failed ({type(e).__name__}): {str(e)[:200]}"}
+        later = d.pop("later_failure", None)           # the re-run's traceback is for the next round, not the record
+        decisions.append(d)
+        if kept_last is not None and d["outcome"] != "healed":
+            kept_last.update(still_failing=True, still_failing_why=f"the next failure was not healed ({d['outcome']}): "
+                                                                  f"{d.get('why') or d.get('reason') or 'no reason given'}")
+        if d["outcome"] != "healed":
+            return
+        healed.append(d)
+        if d.get("reason") != "later_locator":
+            return
+        kept_last = d
+        if not later or rounds >= LATER_ROUNDS:
+            d.update(still_failing=True, still_failing_why=(
+                f"stopped after {LATER_ROUNDS} further heals, the test still fails at a later locator" if later
+                else "the test still fails at a later locator"))
+            return
+        rounds += 1
+        failure = later
+
+
 def heal_failures(fails, healer, max_n, verify=verify_passed):
     """
-    One decision per failing test. Failures past `max_n` are recorded as needs_human, never dropped. A failure a
-    previous heal already fixed (a page object shared by several tests) is confirmed by re-running it, not healed twice.
+    The decisions for failing tests, one per heal (a test healed in several rounds has several). Failures past `max_n` are
+    recorded as needs_human, never dropped. A failure a previous heal already fixed (a page object shared by several
+    tests) is confirmed by re-running it, not healed twice.
     """
     decisions, healed = [], []
     for f in fails[:max_n]:
@@ -133,10 +180,7 @@ def heal_failures(fails, healer, max_n, verify=verify_passed):
                               "to": first["to"], "files": first.get("files", []), "usage": {},
                               "source": f"same fix as {first['test']} (shared locator), re-run passed"})
             continue
-        d = healer.heal(f)
-        decisions.append(d)
-        if d["outcome"] == "healed":
-            healed.append(d)
+        heal_test(f, healer, decisions, healed)
     decisions += [{"test": f["name"], "outcome": "needs_human", "reason": "beyond_max",
                    "why": f"not attempted: beyond --max {max_n}"} for f in fails[max_n:]]
     return decisions
@@ -148,7 +192,8 @@ def write_summary(decisions, started, run_id, directory=None):
     directory.mkdir(parents=True, exist_ok=True)
     counts = {k: sum(1 for d in decisions if d["outcome"] == k) for k in ("healed", "needs_human", "not_drift")}
     summary = {"run_id": run_id, "mode": "heal", "started": started, "finished": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-               "failures": len(decisions), "counts": counts, "usage": run_total(decisions), "decisions": decisions}
+               "failures": len({d["test"] for d in decisions}), "counts": counts,
+               "kept_still_failing": sum(1 for d in decisions if d.get("still_failing")), "usage": run_total(decisions), "decisions": decisions}
     path = directory / "heal-summary.json"
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -166,6 +211,8 @@ def print_decisions(decisions):
     for d in decisions:
         if d["outcome"] == "healed":
             print(f"  [healed] {d['test']}: {d['file']}: {d['from']} -> {d['to']}  ({_tokens(d)})")
+            if d.get("still_failing"):
+                print(f"    kept, test still fails later: {d.get('still_failing_why')}")
         else:
             reason = f" [{d['reason']}]" if d.get("reason") else ""
             print(f"  [{d['outcome']}]{reason} {d['test']}: {d.get('why')}  ({_tokens(d)})")
@@ -211,6 +258,10 @@ def build_pr_body(healed, other):
     body = "Automated locator healing (out-of-band).\n\n## Healed (locators only, intent preserved)\n"
     body += "\n".join(f"- **{md_escape(d['test'])}** -- {md_code(d['from'])} -> {md_code(d['to'])} "
                       f"({md_escape(d.get('why') or d.get('source'))})" for d in healed)
+    still = [d for d in healed if d.get("still_failing")]
+    if still:
+        body += "\n\n## Kept, test still fails later (review)\n" + "\n".join(
+            f"- **{md_escape(d['test'])}** -- {md_escape(d.get('still_failing_why'))}" for d in still)
     if other:
         body += "\n\n## Needs human review (not touched)\n" + "\n".join(
             f"- **{md_escape(d['test'])}** -- {md_escape(d.get('why'))}" for d in other)
@@ -282,7 +333,7 @@ def main():
         return
     print(f"[heal] {len(fails)} failing test(s).")
 
-    healer = Healer(service, settings, verify_passed, run_id=run_id)
+    healer = Healer(service, settings, verify_run, run_id=run_id)
     decisions = heal_failures(fails, healer, args.max)
 
     print_decisions(decisions)
@@ -296,7 +347,9 @@ def main():
                 print("[heal] recorded the healed locators for follow-up in .heal/heals.json")
         except Exception as e:                           # bookkeeping: the PR is already open
             print(f"[heal] could not record the heals for follow-up ({type(e).__name__})")
-    print(f"\n[heal] done: {len(healed)} healed, {len(other)} for human review. Summary: {path}")
+    still = sum(1 for d in healed if d.get("still_failing"))
+    print(f"\n[heal] done: {len(healed)} healed, {len(other)} for human review"
+          + (f", {still} kept but the test still fails later" if still else "") + f". Summary: {path}")
 
 
 if __name__ == "__main__":

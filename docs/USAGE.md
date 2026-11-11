@@ -93,6 +93,20 @@ test ran *and* passed *and* the service confirms the heal. The service never see
 input values, cookies or storage state, and this client sends **no screenshot**
 unless you turn vision on (`HEAL_VISION=auto|on`, see *Vision* below).
 
+**A heal that is kept although the test still fails.** A heal is also kept when the
+patched line passes on the re-run and the test then stops at a *different* locator on
+a different line (or file) that found nothing: the client reports that failure to the
+service (`failed_later`, with the later error cut to 4000 characters) and the service
+decides. The patch stays on disk until the service answers and is reverted unless it
+confirms. The next failure of that test is then healed in a further round, up to 3
+more per test (`LATER_ROUNDS` in `scripts/heal.py`), each round its own decision. A
+later *value* or *assertion* failure does not keep a heal, since the heal may have
+reached the wrong element. If a chain ends on a failure that cannot be healed, the
+earlier heals stay and the last one is marked `still_failing`; the PR body lists such
+tests under "Kept, test still fails later" for a person to review.
+Ctrl-C or SIGTERM while an edit waits for the service's answer reverts it, and a further round
+that errors is recorded as `needs_human` (`chain_error`) without losing the earlier heals.
+
 The element inventory is cut to an allowlist before it leaves (`INVENTORY_KEYS` in
 `utils/heal_redact.py`): `tag`, `type`, `role`, `name`, `label`, `placeholder`, `text`,
 `row`, `row_attr`, `aria_label`, `title`, `alt`, `for_attr`, the test hooks and `id`,
