@@ -164,12 +164,16 @@ class TestMain:
         assert "1 healed, 1 for human review" in out and "run total" in out
         assert json.loads((tmp_path / "art" / "heal-summary.json").read_text())["counts"]["healed"] == 1
 
-    def test_vision_setting_is_accepted_but_nothing_is_captured(self, tmp_path, monkeypatch, capsys):
+    def test_vision_auto_says_a_masked_screenshot_is_sent_and_an_unknown_value_runs_with_vision_off(self, tmp_path, monkeypatch, capsys):
         self._env(monkeypatch, tmp_path)
-        monkeypatch.setenv("HEAL_VISION", "auto")
         monkeypatch.setattr(heal, "run_suite", lambda kw=None: [])
+        monkeypatch.setenv("HEAL_VISION", "auto")
         heal.main()
-        assert "sends no screenshot yet" in capsys.readouterr().out
+        assert "one masked viewport screenshot is sent per failure" in capsys.readouterr().out
+        monkeypatch.setenv("HEAL_VISION", "full")
+        heal.main()
+        out = capsys.readouterr().out
+        assert "running with vision off, no screenshot is taken" in out and "masked viewport" not in out
 
     def test_pytest_children_run_with_heal_run_set_so_fingerprints_are_not_recorded(self, monkeypatch):
         seen = {}

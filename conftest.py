@@ -1,6 +1,6 @@
 """
 ===============================================================================
-Playwright Browser Configuration and Page Fixture with Auto AI Healing
+Playwright Browser Configuration and Page Fixture with In-Run Heal Advice
 ===============================================================================
 
 This module provides the core Playwright browser configuration and page fixture
@@ -8,9 +8,13 @@ for automated testing across multiple browsers (Chromium, Firefox, WebKit).
 It handles browser selection, headless mode configuration, and provides a
 reusable async page fixture for all test modules.
 
-NEW: Automatic AI healing is applied to ALL tests without needing decorators!
-NEW: Automatically starts Ollama service if not running!
-NEW: Automatically loads and warms up the specified model if not available!
+In-run heal advice: when HEAL_ADVISE=on and HEAL_SERVICE_URL is set, a test that fails
+for good (after its reruns) is posted to the heal service in advise mode while its page
+is still open. The service answers with a decision and the best locator, never a patch;
+it goes into the healing report and heal-summary.json, and nothing is edited. The
+framework holds no model URL, model name or prompt: the service owns them
+(see utils/heal_advise.py). The earlier direct-to-model path (utils/ai_healing.py) is
+deprecated and no longer called.
 
 Features:
     ✓ Multi-browser support (Chromium, Firefox, WebKit) via environment variables
@@ -18,25 +22,22 @@ Features:
     ✓ Centralized browser options management through settings configuration
     ✓ Automatic browser cleanup after test execution
     ✓ Runtime browser selection without code changes
-    ✓ AUTOMATIC AI healing for all test failures (no decorators needed!)
-    ✓ Auto-starts Ollama service if not running
-    ✓ Auto-loads and warms up specified model if not available
-    ✓ Configurable Ollama host and model via environment variables
+    ✓ In-run heal advice on every final locator failure, no decorators needed
+    ✓ Advice decision in the healing report, heal-summary.json and the observability report
     ✓ Thread-safe for parallel test execution
 
 Environment Variables:
     BROWSER: Specifies which browser to use (chromium|firefox|webkit)
     HEADLESS: Controls headless mode (true|false)
-    OLLAMA_HOST: Ollama server URL (default: http://localhost:11434)
-    OLLAMA_MODEL: Model to use for AI healing (default: qwen3:8b)
+    HEAL_ADVISE: "on" to ask the heal service for advice on a final failure (default off)
+    HEAL_SERVICE_URL / HEAL_SERVICE_TOKEN: the heal service and its bearer token
 
 Usage Examples:
-    # Run tests with default browser and AI healing
+    # Run tests with default browser
     pytest
 
-    # Run tests with specific browser, retries, and custom Ollama settings
-    BROWSER=firefox OLLAMA_MODEL=llama3.2:3b pytest --reruns 3
-    OLLAMA_HOST=http://remote-server:11434 pytest --reruns 2
+    # Run tests with a specific browser and retries, asking the heal service for advice on final failures
+    BROWSER=firefox HEAL_ADVISE=on HEAL_SERVICE_URL=http://localhost:8765 pytest --reruns 2
 
     # Run tests in headed mode for debugging
     HEADLESS=false pytest
@@ -46,14 +47,13 @@ Fixture Usage:
     async def test_example(page):
         await page.goto("https://example.com")
         # Test implementation here...
-        # AI healing will automatically capture context on failure!
+        # With HEAL_ADVISE=on a final locator failure is posted to the heal service
 
 Dependencies:
     - playwright.async_api: Async Playwright API
     - pytest_asyncio: Async test support
     - config.settings: Application configuration management
-    - utils.ai_healing: AI healing service
-    - requests: For Ollama service health checks
+    - utils.heal_advise: in-run advice from the heal service
 
 Author: PMAC
 Date: [2025-07-29]
@@ -72,7 +72,11 @@ from playwright.async_api import Locator, TimeoutError as PlaywrightTimeoutError
 import threading
 from collections import defaultdict
 import asyncio
-from utils.ai_healing import get_ollama_service, find_page_object, ensure_ollama_ready
+from utils.heal_advise import (
+    AdviseRun, AdviseSettings, advise as heal_advise, error_decision, find_page_object, metric_fields, snapshot_page,
+    write_report as write_advice_report,
+)
+from utils.heal_client import ServiceClient
 from utils.browserstack import is_browserstack_enabled
 from utils.debug import debug_print
 from utils.heal_locale import track_language
@@ -108,10 +112,13 @@ pytest_fixtures = [
 ]
 
 # Thread-safe dictionary and lock for tracking test failure counts
-_ai_healing_fail_counts = defaultdict(int)
-_ai_healing_lock = threading.Lock()
+_advise_fail_counts = defaultdict(int)
+_advise_lock = threading.Lock()
 
-ollama_service = get_ollama_service()
+# In-run advice from the heal service (off unless HEAL_ADVISE=on and HEAL_SERVICE_URL is set)
+advise_settings = AdviseSettings.from_env()
+advise_run = AdviseRun()
+_advise_client = None
 
 # OWASP ZAP passive-scan integration (disabled unless ZAP_ENABLED=true)
 zap = ZAPIntegration()
@@ -120,7 +127,7 @@ zap = ZAPIntegration()
 class ElementNotFoundException(Exception):
     """
     Custom exception raised when a Playwright Locator times out waiting for an element.
-    This helps AI healing to detect element-not-found scenarios explicitly.
+    This helps heal advice to detect element-not-found scenarios explicitly.
     """
 
     pass
@@ -380,50 +387,82 @@ async def page(request):
 # ------------------------------------------------------------------------------
 # Hook: pytest_runtest_makereport
 # ------------------------------------------------------------------------------
+def _run_async(coro):
+    """Run a coroutine to completion from this synchronous hook, on the loop the test used when there is one."""
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
+
+
+def _advise_on_failure(item, rep, page):
+    """Ask the heal service for advice on a final failure and record the answer (report, summary line, allure attachment).
+    Never raises: a failed ask is a needs_human decision that says why."""
+    global _advise_client
+    error_text = getattr(rep, "longreprtext", "") or str(rep.longrepr)
+    failure = {"name": item.nodeid, "classname": "", "error": error_text[:100_000]}
+    snapshot = None
+    try:
+        if page is None:
+            decision = error_decision(item.nodeid, "no_page", "no Playwright page was found for this test")
+        else:
+            snapshot = _run_async(snapshot_page(page))
+            if _advise_client is None:
+                _advise_client = ServiceClient(advise_settings.heal.url, advise_settings.heal.token)
+            decision = heal_advise(_advise_client, advise_settings.heal, Path(str(item.config.rootpath)), failure, snapshot,
+                                   advise_run.run_id)
+    except Exception as e:                                  # the browser is gone, the loop is busy: advice is skipped
+        decision = error_decision(item.nodeid, "client_error", f"could not collect the page: {type(e).__name__}")
+    advise_run.add(item.nodeid, decision)
+    advise_run.print_decision(decision)
+    try:
+        path = write_advice_report(decision, {"test_name": item.name, "path": (snapshot or {}).get("path", ""),
+                                              "error_message": error_text})
+        allure.attach(path.read_text(encoding="utf-8"), name=f"Heal advice: {item.name}",
+                      attachment_type=allure.attachment_type.TEXT)
+    except Exception as e:
+        print(f"[heal advise] could not write the report: {type(e).__name__}")
+
+
 @pytest.hookimpl(tryfirst=True, hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     """
     Hook that runs after each test phase (setup, call, teardown).
-    Automatically captures context for AI healing on ANY test failure.
-    Triggers AI healing only on final failure (after all retries).
-    Thread-safe for parallel test runs.
+    Records the phase result for fixtures, and, with HEAL_ADVISE=on, asks the heal service for advice on a final failure
+    (after all retries). Thread-safe for parallel test runs.
 
     NO DECORATORS NEEDED - this applies to ALL tests automatically!
     """
     outcome = yield
     rep = outcome.get_result()
 
-    # Record the phase result for fixtures (trace/screenshot-on-failure) even
-    # when AI healing is disabled.
+    # Record the phase result for fixtures (trace/screenshot-on-failure) even when advice is off.
     setattr(item, "rep_" + rep.when, rep)
 
-    # Skip all AI healing logic if disabled
-    if not ollama_service.enabled:
+    # Skip all heal advice logic unless it is switched on
+    if not advise_settings.enabled:
         return
 
     debug_print(
         f"DEBUG: rep.when={rep.when}, rep.failed={rep.failed}, item={item.nodeid}"
     )
 
-    setattr(item, "rep_" + rep.when, rep)
-
     if rep.when == "call" and rep.failed:
         test_key = item.nodeid
         max_reruns = item.config.getoption("reruns") or 0
 
         # Increment fail count in a thread-safe way
-        with _ai_healing_lock:
-            _ai_healing_fail_counts[test_key] += 1
-            fail_count = _ai_healing_fail_counts[test_key]
+        with _advise_lock:
+            _advise_fail_counts[test_key] += 1
+            fail_count = _advise_fail_counts[test_key]
 
         debug_print(
             f"DEBUG: {test_key} fail_count={fail_count} (max_reruns={max_reruns})"
         )
 
-        # Capture context on EVERY failure (for screenshot, DOM, etc.)
         page = find_page_object(item)
-        error_message = str(call.excinfo.value) if call.excinfo else "Unknown error"
-        screenshot_path = None
 
         # Attach captured API requests/responses on failure (QA-19)
         if page is not None and hasattr(page, "_api_capture"):
@@ -435,123 +474,15 @@ def pytest_runtest_makereport(item, call):
                     attachment_type=allure.attachment_type.JSON,
                 )
 
-        # Use async capture_failure_context for full context (including DOM)
-        if page:
-            try:
-                context, screenshot_path = asyncio.get_event_loop().run_until_complete(
-                    ollama_service.capture_failure_context(
-                        page,
-                        error_message,
-                        item.name,
-                        getattr(item.function, "__func__", None),
-                    )
-                )
-            except Exception as e:
-                print(f"🧠 Error capturing failure context: {e}")
-                context = {
-                    "test_name": item.name,
-                    "error_message": error_message,
-                    "error_type": type(call.excinfo.value).__name__
-                    if call.excinfo
-                    else "Unknown",
-                    "test_docstring": getattr(
-                        getattr(item.function, "__func__", None), "__doc__", ""
-                    ),
-                    "capture_error": str(e),
-                    "dom": f"DOM not available due to error: {e}",
-                }
-        else:
-            context = {
-                "test_name": item.name,
-                "error_message": error_message,
-                "error_type": type(call.excinfo.value).__name__
-                if call.excinfo
-                else "Unknown",
-                "test_docstring": getattr(
-                    getattr(item.function, "__func__", None), "__doc__", ""
-                ),
-                "capture_error": "No page object found",
-                "dom": "DOM not available: No page object found",
-            }
-
-        # Try to get the original test code
-        original_test_code = ""
-        try:
-            test_file = item.fspath
-            with open(test_file, "r") as f:
-                original_test_code = f.read()
-        except Exception as e:
-            print(f"Warning: Could not read test file: {e}")
-
-        # Store context for later AI healing
-        if not hasattr(ollama_service, "_pending_contexts"):
-            ollama_service._pending_contexts = {}
-        ollama_service._pending_contexts[test_key] = {
-            "test_name": item.name,
-            "context": context,
-            "original_test_code": original_test_code,
-            "screenshot_path": screenshot_path,
-        }
-
-        # This duplicates code in screenshot_decorator, but only runs if AI healing is on
-        if screenshot_path and os.path.exists(screenshot_path):
-            with open(screenshot_path, "rb") as image_file:
-                allure.attach(
-                    image_file.read(),
-                    name=f"AI Healing Screenshot: {item.name}",
-                    attachment_type=allure.attachment_type.PNG,
-                )
-
-        # Only trigger AI healing on the final failure
+        # Only ask for advice on the final failure
         if fail_count > max_reruns:
-            print(f"\n🧠 Final failure detected for {item.name}, triggering AI healing")
-            if hasattr(ollama_service, "_pending_contexts"):
-                context_data = ollama_service._pending_contexts.get(test_key)
-                if not context_data:
-                    context_data = ollama_service._pending_contexts.get(item.name)
-                if context_data and ollama_service.enabled:
-                    if not ensure_ollama_ready():
-                        print(
-                            "🧠 AI healing skipped - Ollama service or model unavailable"
-                        )
-                        return
-                    try:
-                        ai_response = ollama_service.call_ollama_healing(
-                            context_data["context"],
-                            context_data["original_test_code"],
-                            context_data["screenshot_path"],
-                        )
-                        if ai_response:
-                            asyncio.run(
-                                ollama_service.generate_healing_report(
-                                    context_data["test_name"],
-                                    ai_response,
-                                    context_data["context"],
-                                )
-                            )
-                        else:
-                            print(f"🧠 Ollama analysis failed for {item.name}")
-                        # Clean up
-                        if test_key in ollama_service._pending_contexts:
-                            del ollama_service._pending_contexts[test_key]
-                        if item.name in ollama_service._pending_contexts:
-                            del ollama_service._pending_contexts[item.name]
-                    except Exception as e:
-                        print(f"🧠 AI healing hook failed: {e}")
-                else:
-                    if not context_data:
-                        print(f"🧠 No context data found for {item.name}")
-                    if not ollama_service.enabled:
-                        print(f"🧠 AI healing disabled for {item.name}")
-            else:
-                print("🧠 No pending contexts found")
-            # Clean up fail count
-            with _ai_healing_lock:
-                if test_key in _ai_healing_fail_counts:
-                    del _ai_healing_fail_counts[test_key]
+            print(f"\n[heal advise] final failure for {item.name}, asking the heal service")
+            _advise_on_failure(item, rep, page)
+            with _advise_lock:
+                _advise_fail_counts.pop(test_key, None)
         else:
             print(
-                f"🔄 Test {item.name} will be retried (attempt {fail_count}), skipping AI healing"
+                f"[heal advise] {item.name} will be retried (attempt {fail_count}), no advice yet"
             )
 
 
@@ -682,6 +613,7 @@ def pytest_runtest_logreport(report):
             browser=browser,
             error_category=categorize_error(error_msg),
             tags=_get_test_tags(report),
+            **metric_fields(advise_run.get(nodeid)),
         )
         observability_collector.record(metric)
 
@@ -714,6 +646,9 @@ def pytest_runtest_logreport(report):
 
 
 def pytest_sessionfinish(session, exitstatus):
+    summary_path = advise_run.write_summary() if advise_settings.enabled else None
+    if summary_path:
+        print(f"[heal advise] summary: {summary_path}")
     if observability_collector.enabled:
         observability_collector.write_report()
         observability_collector.print_summary()

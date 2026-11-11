@@ -4,8 +4,8 @@ Page Probe (the element inventory a client collects and sends)
 ===============================================================================
 Run in the page as `page.evaluate(<this file>)` for the whole page, or as `locator.evaluate(<this file>)` to describe just
 that one element (a client uses that to check a healed locator against the element it expected). It returns
-{items, more, page}: the elements a locator could hook on, and a small record of the page they came from. The service has
-no browser and never fetches a page, so this list is the only view of the page it ever gets: what is not in it cannot be
+{items, more, copy_more, copy_withheld, copy_withheld_data, page}: the elements a locator could hook on, and a small record
+of the page they came from. The service has no browser and never fetches a page, so this list is the only view of the page it ever gets: what is not in it cannot be
 matched, and what is in it is what it learns.
 
 What it reads is attributes and visible copy, never what a person typed. That is the line this file is written around:
@@ -24,6 +24,24 @@ Features:
       locator can be scoped to the row
     ✓ Things a step acts on without being a control are listed too (an anchor with no href, onclick, tabindex,
       contenteditable, summary, and the outermost element with a pointer cursor); plain containers are not
+    ✓ Elements that hold copy are listed after those, as `copy_only` items, for the steps that find an element by its text
+      (a chat line, a heading, a radio's label text): a visible element with a text node of its own, whose copy is at most
+      80 characters, that is not inside a form control, an editable region or a text-entry role, whose copy holds no
+      e-mail address, long digit run or token-like word, and that is not the same copy as the listed element around it
+      (a button's inner span). They fill only the room the others leave under MAX (never pushing one out), in page order;
+      `copy_more` counts the copy-holding elements left out for want of room (and each copy_only item then says `copy_cut`),
+      so the service never calls a text unique from a list that is missing some
+    ✓ `copy_withheld` counts the visible elements with copy of their own that the filters kept out of the listing (over 80
+      characters, an address, a long run of digits, a token-like word, or inside a control or a data widget), and
+      `copy_withheld_data` the ones inside a control or data widget (an option, a grid cell: short copy that can equal a
+      text locator's): the service cannot call a text unique from a listing that is missing copy that could match it
+    ✓ `text`, `name`, `label`, `aria_label`, `placeholder`, `title` and `alt` of every item are withheld when they hold an
+      address, a long run of digits (6 for a copy_only item, 9 otherwise; digits of any script) or a token-like word
+    ✓ `copy_wrap`: the listed element's whole copy is that of a listed element inside it (said by the DOM), so a text locator
+      matches the inner one, not this
+    ✓ pw_text and a copy_only item's copy are withheld when they hold an address, a long run of digits (6 for a copy_only item,
+      9 otherwise) or a token-like word; `output` and the copy inside a grid, list or tree role are never listed as copy_only
+    ✓ `for_attr`: the `for` of a label, and every `label[for]` is listed, so a locator on it can be counted
     ✓ testid is data-testid ONLY; data-test, data-qa and data-cy are separate keys (data_test, data_qa, data_cy), so the
       service can honour whichever attribute the client's Playwright config names as its test id attribute
     ✓ Every other data-* attribute is listed as data_<name> (hyphens become underscores) when its name is lower-case
@@ -34,7 +52,8 @@ Features:
       included, at most 200 characters) and `pw_cut` says it is incomplete (longer, too big, or holding a textarea, a
       select or an editable region, whose text is never read)
     ✓ No ref: the service numbers the items (e0, e1, ...) in the order they come back
-    ✓ At most MAX (500) items; `more` counts the ones left out, so the service knows the list is not complete
+    ✓ At most MAX (500) items; `more` counts the ones left out, so the service knows the list is not complete (a copy_only
+      item left out for want of room is counted in `copy_more`, not here: it was never part of the complete list)
     ✓ `page`: path (no query or hash: they can carry tokens), lang, browser_lang, viewport, scroll, dpr
 
 Environment Variables:
@@ -45,7 +64,7 @@ Author: PMAC
 */
 (only) => {
   const sel = 'iframe,input,select,textarea,button,a,summary,[onclick],[tabindex]:not([tabindex="-1"]),[contenteditable],'
-    + '[role],[id],[data-testid],[data-test],[data-qa],[data-cy]';
+    + '[role],[id],[data-testid],[data-test],[data-qa],[data-cy],label[for]';
   const MAX = 500;
   const items = []; let more = 0;
   // control characters (line breaks included) become a space: a value cannot break a line in a prompt or a log
@@ -53,7 +72,7 @@ Author: PMAC
   const cl = s => String(s == null ? '' : s).slice(0, 2000).replace(CONTROL, ' ');
   const clean = s => cl(s).replace(/\s+/g, ' ').trim();
   const SECRETISH = /token|csrf|auth|session|secret|email|password/i;
-  const VALUE_TAGS = /^(input|textarea|select|script|style|template|noscript)$/i;   // their content is a value or markup
+  const VALUE_TAGS = /^(input|textarea|select|output|script|style|template|noscript)$/i;   // their content is a value or markup
   const hasData = el => el.getAttributeNames().some(n => n.startsWith('data-'));
   const HOOKS = ['data-qa', 'data-testid', 'data-test', 'data-cy', 'id'];
   // [value, attribute] of the element's first hook in HOOKS order, or ['', '']
@@ -76,15 +95,23 @@ Author: PMAC
   // length and depth: it is the one place text is read from a page, so it is the one place a value could slip in.
   // a text-entry widget by any token of its role (Playwright reads role as a token list): its text may be typed data
   const ENTRY_ROLE = /(^|\s)(textbox|searchbox|combobox|spinbutton|slider)(?=\s|$)/i;
-  const copy = (node, win, depth = 0) => {
+  // text that could be personal or a secret: an address, a long run of digits (a card, a phone), a token-like word. A copy_only
+  // item is held to a shorter run (an OTP or a short code is 6 digits), and this is checked on pw_text of every item too
+  const SENSITIVE = /[^\s@]+@[^\s@]+\.[^\s@]+|(?:\p{Nd}[ .-]?){9,}/u;       // \p{Nd}: digits of any script
+  const SENSITIVE_COPY = /[^\s@]+@[^\s@]+\.[^\s@]+|(?:\p{Nd}[ .-]?){6,}/u;
+  const tokenish = t => t.split(' ').some(w => w.length >= 24 && /\p{Nd}/u.test(w) && /[A-Za-z]/.test(w));
+  // `s` unless it holds something the filters above withhold (a copy_only item is held to the shorter digit run)
+  const safe = (s, strict) => (s && ((strict ? SENSITIVE_COPY : SENSITIVE).test(s) || tokenish(s))) ? '' : s;
+  const COPY_NODES = 1000;       // nodes one read of a copy looks at, whatever they hold
+  const copy = (node, win, depth = 0, st = {n: 0}) => {
     let out = '';
     for (const c of node.childNodes) {
-      if (out.length > 400 || depth > 30) break;
+      if (out.length > 400 || depth > 30 || ++st.n > COPY_NODES) break;
       if (c.nodeType === 3) { out += c.nodeValue; continue; }
       if (c.nodeType !== 1 || VALUE_TAGS.test(c.tagName) || c.isContentEditable || ENTRY_ROLE.test(c.getAttribute('role') || '')) continue;
       const d = win.getComputedStyle(c).display;
       if (d === 'none') continue;
-      const inner = copy(c, win, depth + 1);
+      const inner = copy(c, win, depth + 1, st);
       out += d.startsWith('inline') ? inner : ' ' + inner + ' ';
     }
     return out;
@@ -106,7 +133,7 @@ Author: PMAC
   // chosen data, so it is never read): the service then cannot say the text is NOT there. Hidden text is read because
   // has_text reads it; a text holding a token-like run (24+ letters and digits) is not sent at all (pw_cut, empty).
   const PW_CHARS = 200, PW_NODES = 2000, PW_RAW = 2000;
-  const pwText = (el, win) => {
+  const pwText = (el, win, leaf) => {
     let raw = '', nodes = 0, cut = false;
     const walk = n => {
       if (cut) return;
@@ -114,7 +141,7 @@ Author: PMAC
       if (n.nodeType === 3) { raw += n.nodeValue || ''; return; }
       if (n.nodeType === 1) {
         if (n.tagName === 'SCRIPT' || n.tagName === 'STYLE' || n.tagName === 'NOSCRIPT') return;
-        if (/^(textarea|select)$/i.test(n.tagName) || n.isContentEditable
+        if (/^(textarea|select|output)$/i.test(n.tagName) || n.isContentEditable
             || ENTRY_ROLE.test(n.getAttribute('role') || '')) { cut = true; return; }
         if (/^input$/i.test(n.tagName)) {
           if (/^(button|submit|reset)$/i.test(n.type)) raw += ownCopy(n, win, true);
@@ -128,13 +155,133 @@ Author: PMAC
     };
     walk(el);
     const t = raw.replace(/\u200b/g, '').trim().replace(/\s+/g, ' ');
-    if (t.split(' ').some(w => w.length >= 24 && /\d/.test(w) && /[A-Za-z]/.test(w))) return {pw_text: '', pw_cut: true};
+    if (tokenish(t) || (leaf ? SENSITIVE_COPY : SENSITIVE).test(t)) return {pw_text: '', pw_cut: true};
     return {pw_text: t.slice(0, PW_CHARS), pw_cut: cut || t.length > PW_CHARS};
   };
   const describeOnly = only instanceof Element;      // called through locator.evaluate: just that element
+  const winOf = el => el.ownerDocument.defaultView || window;
+  const pointer = el => winOf(el).getComputedStyle(el).cursor === 'pointer';
+  const clickable = el => !!el.parentElement && el.tagName !== 'BODY' && pointer(el) && !pointer(el.parentElement);
+  const isListed = el => el.matches(sel) || hasData(el) || clickable(el);
+  // The next element up, across a shadow root to its host; bounded by the caller (a page can clobber parentElement).
+  const up = n => { const p = n.parentNode; return p && p.nodeType === 11 ? p.host || null : p && p.nodeType === 1 ? p : null; };
+  // inside a form control, an editable region, a text-entry widget or a widget of rows of data (grid, list, tree, table): the
+  // text there can be typed, chosen or somebody's data (a typeahead lists people and addresses no filter tells from page copy).
+  // An element with such a role is still listed itself, as a control.
+  const DATA_ROLE = /(^|\s)(listbox|option|grid|gridcell|treegrid|tree|treeitem|table|row|cell)(?=\s|$)/i;
+  const inEntry = el => {
+    for (let p = el, n = 0; p && n < 100; p = up(p), n++) {
+      if (VALUE_TAGS.test(p.tagName) || /^(option|optgroup|datalist)$/i.test(p.tagName) || p.isContentEditable
+          || ENTRY_ROLE.test(p.getAttribute('role') || '') || DATA_ROLE.test(p.getAttribute('role') || '')) return true;
+    }
+    return false;
+  };
+  // The copy of a visible element that has a text node of its own and is not listed for another reason, else ''.
+  const COPY_CHARS = 80;
+  const hasOwnText = el => Array.from(el.childNodes).some(c => c.nodeType === 3 && c.nodeValue.trim());
+  let why = '';                       // why the last copyOf said '': 'data' (inside a control or a data widget), 'withheld', or ''
+  const copyOf = el => {
+    why = '';
+    if (!hasOwnText(el)) return '';
+    const win = winOf(el), t = clean(copy(el, win));
+    if (!t) return '';
+    if (!visibleBox(el)) {         // no box: hidden for good, or copy that is not drawn on its own but is on the page
+      if (win.getComputedStyle(el).display === 'contents') {
+        // drawn by the first ancestor with a box (display:contents nests); short copy an exact text can equal, so data
+        let p = el.parentElement, n = 0;
+        while (p && n++ < 100 && win.getComputedStyle(p).display === 'contents') p = p.parentElement;
+        if (p && p.checkVisibility && p.checkVisibility()) why = 'data';
+      } else if (/^(option|optgroup)$/i.test(el.tagName)) { const sl = el.closest('select'); if (sl && visibleBox(sl)) why = 'data'; }
+      return '';
+    }
+    if (el.checkVisibility && !el.checkVisibility()) return '';     // inside a closed <details>
+    if (inEntry(el)) { why = 'data'; return ''; }
+    if (t.length > COPY_CHARS || SENSITIVE_COPY.test(t) || tokenish(t)) { why = 'withheld'; return ''; }
+    const p = el.parentElement;
+    return p && isListed(p) && copyText(p) === t ? '' : t;       // the listed element around it already says it
+  };
+  // The copy of an element, read once (a page of listed elements round one wrapper must not read it again for each of them)
+  const copyCache = new Map();
+  const copyText = el => {
+    let t = copyCache.get(el);
+    if (t === undefined) { t = clean(copy(el, winOf(el))); copyCache.set(el, t); }
+    return t;
+  };
+  const visibleBox = el => {
+    const r = el.getBoundingClientRect(), cs = winOf(el).getComputedStyle(el);
+    return !!(r.width && r.height) && cs.visibility !== 'hidden' && cs.display !== 'none';
+  };
+  // The listed element `inner` sits in when its whole copy is that of `inner` (a wrapper of one text), else null. A hidden
+  // inner element marks nothing: the snapshot and the count leave it out, so its wrapper still holds the text itself.
+  const wrapperOf = inner => {
+    const t = copyText(inner);
+    if (!t || !visibleBox(inner)) return null;
+    for (let a = up(inner), n = 0; a && n < 100; a = up(a), n++) {
+      if (isListed(a)) return copyText(a) === t ? a : null;
+    }
+    return null;
+  };
+  // does a listed element (or a copy_only one) inside `el` hold all of el's copy?
+  const wrapsItself = el => {
+    let n = 0;
+    for (const d of el.querySelectorAll('*')) {
+      if (++n > 2000) break;
+      if (!/^(script|style|template|noscript)$/i.test(d.tagName) && (isListed(d) || copyOf(d)) && wrapperOf(d) === el) return true;
+    }
+    return false;
+  };
+  const build = (el, c, leaf, cut, wrap) => {
+    const win = winOf(el), {frame, shadow, ox, oy} = c;
+    const r = el.getBoundingClientRect(), cs = win.getComputedStyle(el);
+    const hidden = !(r.width || r.height) || cs.visibility === 'hidden' || cs.display === 'none';
+    const labels = el.labels ? Array.from(el.labels).map(l => clean(copy(l, win))).join(' ') : '';
+    const byIds = (el.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
+      .map(i => el.getRootNode().getElementById ? el.getRootNode().getElementById(i) : null).filter(Boolean)
+      .map(n => clean(copy(n, win))).join(' ');
+    const at = n => cl(String(el.getAttribute(n) || '').slice(0, 400)).trim().slice(0, 200);
+    const text = ownCopy(el, win);
+    const item = {tag: el.tagName.toLowerCase(), type: at('type'), role: at('role'),
+      name: clean(at('aria-label') || text).slice(0, 80),
+      aria_label: at('aria-label').slice(0, 80), label: (labels || byIds).slice(0, 80),
+      placeholder: at('placeholder'), id: cl(el.id || '').slice(0, 200),
+      testid: at('data-testid'), data_test: at('data-test'), data_qa: at('data-qa'), data_cy: at('data-cy'),
+      class: at('class').slice(0, 120), name_attr: at('name'), for_attr: at('for').slice(0, 200), title: at('title').slice(0, 80),
+      alt: at('alt').slice(0, 80),
+      text, disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true',
+      hidden, box: hidden || !(r.width > 0 && r.height > 0) ? null
+        : {x: r.left + ox, y: r.top + oy, width: r.width, height: r.height}};
+    for (const k of ['text', 'name', 'label', 'aria_label', 'placeholder', 'title', 'alt']) item[k] = safe(item[k], leaf);
+    if (leaf) { item.copy_only = true; if (cut) item.copy_cut = true; }
+    if (wrap) item.copy_wrap = true;
+    for (const n of el.getAttributeNames()) {
+      // only names the key maps back to one way (no `_`: data-a_b and data-a-b would share data_a_b) and the service accepts
+      if (/^data-[a-z0-9-]{1,60}$/.test(n) && !['data-testid', 'data-test', 'data-qa', 'data-cy'].includes(n) && !SECRETISH.test(n)) {
+        item['data_' + n.slice(5).replace(/-/g, '_')] = at(n).slice(0, 80);
+      }
+    }
+    // Whether this element (or something inside it) is what a click at its box centre would hit. The service's
+    // place proof needs it: a box alone can be taken over by another element moved into the freed spot. Only for a
+    // centre inside the element's own viewport; off-screen is unknown, not false.
+    if (item.box) {
+      const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+      if (cx >= 0 && cy >= 0 && cx < win.innerWidth && cy < win.innerHeight) {
+        const rootNode = el.getRootNode();
+        const hit = (rootNode.elementFromPoint ? rootNode : el.ownerDocument).elementFromPoint(cx, cy);
+        item.top_at_center = !!hit && (hit === el || el.contains(hit));
+      }
+    }
+    const [row, rowAttr] = rowOf(el);
+    if (row) { item.row = row; item.row_attr = rowAttr; }
+    if (frame) item.frame = frame;
+    if (shadow.length) item.shadow = shadow.join(' >> ');
+    return Object.assign(item, pwText(el, win, leaf));
+  };
+  // Page order, in one walk; what is listed is decided after it: every listed element first, then the copy_only ones in the
+  // room that is left (never more than MAX in all).
   const queue = [{root: document, frame: '', shadow: [], ox: window.scrollX, oy: window.scrollY}];
+  const picks = []; let leaves = 0, lead = 0, copyMore = 0, withheld = 0, withheldData = 0;
   while (queue.length) {
-    const {root, frame, shadow, ox, oy} = queue.shift();
+    const c = queue.shift(), {root, frame, shadow, ox, oy} = c;
     for (const el of root.querySelectorAll('*')) {
       if (/^(script|style|template|noscript)$/i.test(el.tagName)) continue;
       if (el.shadowRoot) queue.push({root: el.shadowRoot, frame, shadow: shadow.concat(el.tagName.toLowerCase()), ox, oy});
@@ -148,56 +295,33 @@ Author: PMAC
           }
         } catch (_) { /* a cross-origin frame cannot be read from here */ }
       }
-      const win = el.ownerDocument.defaultView || window;
-      const pointer = el => win.getComputedStyle(el).cursor === 'pointer';
-      const clickable = el => !!el.parentElement && el.tagName !== 'BODY' && pointer(el) && !pointer(el.parentElement);
-      if (describeOnly ? el !== only : !(el.matches(sel) || hasData(el) || clickable(el))) continue;
-      if (items.length >= MAX) { more++; continue; }
-      const r = el.getBoundingClientRect(), cs = win.getComputedStyle(el);
-      const hidden = !(r.width || r.height) || cs.visibility === 'hidden' || cs.display === 'none';
-      const labels = el.labels ? Array.from(el.labels).map(l => clean(copy(l, win))).join(' ') : '';
-      const byIds = (el.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
-        .map(i => el.getRootNode().getElementById ? el.getRootNode().getElementById(i) : null).filter(Boolean)
-        .map(n => clean(copy(n, win))).join(' ');
-      const at = n => cl(String(el.getAttribute(n) || '').slice(0, 400)).trim().slice(0, 200);
-      const text = ownCopy(el, win);
-      const item = {tag: el.tagName.toLowerCase(), type: at('type'), role: at('role'),
-        name: clean(at('aria-label') || text).slice(0, 80),
-        aria_label: at('aria-label').slice(0, 80), label: (labels || byIds).slice(0, 80),
-        placeholder: at('placeholder'), id: cl(el.id || '').slice(0, 200),
-        testid: at('data-testid'), data_test: at('data-test'), data_qa: at('data-qa'), data_cy: at('data-cy'),
-        class: at('class').slice(0, 120), name_attr: at('name'), title: at('title').slice(0, 80), alt: at('alt').slice(0, 80),
-        text, disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true',
-        hidden, box: hidden || !(r.width > 0 && r.height > 0) ? null
-          : {x: r.left + ox, y: r.top + oy, width: r.width, height: r.height}};
-      for (const n of el.getAttributeNames()) {
-        // only names the key maps back to one way (no `_`: data-a_b and data-a-b would share data_a_b) and the service accepts
-        if (/^data-[a-z0-9-]{1,60}$/.test(n) && !['data-testid', 'data-test', 'data-qa', 'data-cy'].includes(n) && !SECRETISH.test(n)) {
-          item['data_' + n.slice(5).replace(/-/g, '_')] = at(n).slice(0, 80);
-        }
+      if (describeOnly) {
+        if (el === only) {
+          const leaf = !isListed(el) && !!copyOf(el);
+          items.push(build(el, c, leaf, false, wrapsItself(el)));
+        }       // as the whole listing would say it
+      } else if (isListed(el)) {
+        if (lead >= MAX) more++;
+        else { lead++; picks.push({el, c, leaf: false}); }
+      } else if (leaves < MAX) {                    // no room for more than MAX of them, whatever the rest of the page holds
+        if (copyOf(el)) { leaves++; picks.push({el, c, leaf: true}); }
+        else if (why) { withheld++; if (why === 'data') withheldData++; }
+      } else if (hasOwnText(el)) {
+        copyMore++;                                 // past the limit it is not looked at: it may hold copy, so it is counted
       }
-      // Whether this element (or something inside it) is what a click at its box centre would hit. The service's
-      // place proof needs it: a box alone can be taken over by another element moved into the freed spot. Only for a
-      // centre inside the element's own viewport; off-screen is unknown, not false.
-      if (item.box) {
-        const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
-        if (cx >= 0 && cy >= 0 && cx < win.innerWidth && cy < win.innerHeight) {
-          const rootNode = el.getRootNode();
-          const hit = (rootNode.elementFromPoint ? rootNode : el.ownerDocument).elementFromPoint(cx, cy);
-          item.top_at_center = !!hit && (hit === el || el.contains(hit));
-        }
-      }
-      const [row, rowAttr] = rowOf(el);
-      if (row) { item.row = row; item.row_attr = rowAttr; }
-      if (frame) item.frame = frame;
-      if (shadow.length) item.shadow = shadow.join(' >> ');
-      Object.assign(item, pwText(el, win));
-      items.push(item);
     }
   }
+  let room = MAX - lead;
+  const kept = picks.filter(p => !p.leaf || room-- > 0);
+  copyMore += picks.length - kept.length;
+  // A listed element whose whole copy is that of a listed element inside it (a wrapper of one text): getByText matches the
+  // inner one only. Said by the DOM, so a text drawn inside another's box is never taken for it.
+  const wraps = new Set();
+  for (const p of kept) { const w = wrapperOf(p.el); if (w) wraps.add(w); }
+  for (const p of kept) items.push(build(p.el, p.c, p.leaf, copyMore > 0, wraps.has(p.el)));
   const page = {path: clean(location.pathname).slice(0, 200), lang: clean(document.documentElement.lang).slice(0, 35),
     browser_lang: clean(navigator.language).slice(0, 35),
     viewport: {width: window.innerWidth, height: window.innerHeight}, scroll: {x: window.scrollX, y: window.scrollY},
     dpr: window.devicePixelRatio};
-  return {items, more, page};
+  return {items, more, copy_more: copyMore, copy_withheld: withheld, copy_withheld_data: withheldData, page};
 }

@@ -15,6 +15,13 @@ Features:
       "double" with \" inside). Nested typed children go too: everything under a textbox or searchbox bar `- /property`
       lines, `text` and `/value` under the other value roles, and block-scalar continuations. /placeholder and combobox
       options stay. Linear time: one pass over the lines, every scan bounded by the line
+    ✓ A link's `/url:` line loses its query and fragment (a reset or session token rides there), and the name of a
+      `[selected]` option goes (it is what a person chose in a select)
+    ✓ scrub_texts(yaml_text, texts): removes each given text from the snapshot; used with the text of the page's
+      contenteditable regions, which Playwright prints as plain `- text:` lines that no role rule can tell from prose
+    ✓ redact_failure_text(error): the failure text cut to what the service's triage reads (the failing locator, the call log's
+      wait lines, the assertion labels, `resolved to <element>`), so no `Received:` / `Expected:` / `Actual` value, no
+      `--showlocals` block, no element HTML and no source line of a code frame (a `fill("#pw", "hunter2")`) leaves
     ✓ clean_inventory(items): the probe's element inventory cut to an allowlist of keys; any key named value or
       defaultValue (any case, any prefix) is dropped, so a probe that learned to read input values cannot carry them out
     ✓ Nothing here talks to the network or the browser: plain functions over plain data
@@ -32,8 +39,14 @@ from typing import Any, Dict, List, Optional, Tuple
 # when the name is not a value, a credential or an address (see _DROP_KEY).
 INVENTORY_KEYS = frozenset({
     "ref", "tag", "type", "role", "name", "aria_label", "label", "placeholder", "id", "testid", "data_test", "data_qa",
-    "data_cy", "class", "name_attr", "title", "alt", "text", "disabled", "hidden", "box", "row", "frame", "shadow",
+    "data_cy", "class", "name_attr", "title", "alt", "text", "disabled", "hidden", "box", "row", "row_attr", "frame", "shadow",
+    # what the service reads to prove a text locator unique and an element reachable: pw_text / pw_cut (the probe's own capped,
+    # token-scrubbed copy of the text Playwright's has_text sees; it never reads a field, a select or an editable region, so it
+    # is as clean as `text`), top_at_center, the copy_only / copy_cut entries of elements listed only because they hold copy,
+    # copy_wrap (a wrapper of one listed text) and a label's for_attr. Leaving them out made the service refuse to claim uniqueness.
+    "pw_text", "pw_cut", "top_at_center", "copy_only", "copy_cut", "copy_wrap", "for_attr",
 })
+_BOOL_KEYS = frozenset({"disabled", "hidden", "pw_cut", "top_at_center", "copy_only", "copy_cut", "copy_wrap"})   # true or false, nothing else
 _DATA_KEY = re.compile(r"^data_[a-z0-9_]{1,60}$")
 _DROP_KEY = re.compile(r"value|token|csrf|auth|session|secret|email|password|cookie", re.I)
 _BOX_KEYS = ("x", "y", "width", "height")
@@ -118,6 +131,30 @@ def _entry(line: str) -> Optional[Tuple[int, int, str, int, bool]]:
     return indent, start, role, end, rest.startswith(":") and bool(rest[1:].strip())
 
 
+def _cut_url(line: str) -> str:
+    """A `- /url: value` line without the query and fragment of its value (a quoted value keeps its quotes)."""
+    head, sep, value = line.partition(":")
+    value = value.strip()
+    quote = value[:1] if value[:1] in "'\"" else ""
+    cut = min([i for i in (value.find("?"), value.find("#")) if i >= 0], default=-1)
+    if cut < 0:
+        return line
+    return f"{head}: {value[:cut]}{quote}"
+
+
+def _selected_option(bare: str, ent: Tuple[int, int, str, int, bool]) -> str:
+    """An `option "name" [selected]` line without its name: the chosen option of a select is what a person picked."""
+    indent, start, role, end, _ = ent
+    key = bare[start:end]
+    j = len(role)
+    if role != "option" or key[j:j + 2] != ' "':
+        return bare
+    k = _quoted_end(key, j + 1)
+    if k < 0 or "[selected" not in key[k:]:
+        return bare
+    return bare[:start] + key[:j] + key[k:] + bare[end:]
+
+
 def _is_property(line: str) -> bool:
     return line.lstrip(" ").startswith("- /")
 
@@ -155,8 +192,132 @@ def redact_typed_values(yaml_text: str) -> str:
             # Cut at the key: the inline value and its colon go, and the dash is normalised to "- " so every
             # redacted line has one shape whatever the spacing it arrived with.
             line = " " * ent[0] + "- " + bare[ent[1]:ent[3]] + line[len(bare):]
+        elif ent is not None and ent[2] == "option":
+            line = _selected_option(bare, ent) + line[len(bare):]
+        elif bare.lstrip(" ").startswith("- /url:"):
+            line = _cut_url(bare) + line[len(bare):]
         out.append(line)
     return "".join(out)
+
+
+def scrub_texts(yaml_text: str, texts: Any, minimum: int = 3) -> str:
+    """`yaml_text` with every occurrence of each text in `texts` removed (texts shorter than `minimum` characters are left,
+    because removing them would eat the snapshot). For the text of contenteditable regions."""
+    out = yaml_text
+    for t in sorted({str(x).strip() for x in (texts if isinstance(texts, (list, tuple)) else [])} - {""}, key=len, reverse=True):
+        for piece in {t, *[ln.strip() for ln in t.splitlines()]}:
+            if len(piece) >= minimum:
+                out = out.replace(piece, "")
+    return out
+
+
+# What the service's triage reads of a failure (see the service's triage.py / failing.py): the locator Playwright prints after
+# `waiting for` or `strict mode violation:` (and the state words of a wait), `locator resolved to <`, `element(s) not found`,
+# the assertion LABELS (`Expected string`, `Received value`, `unexpected value`) that tell a wrong value from a missing element,
+# and, when no printed locator is left, the locator call of a code-frame or source line (its receiver and call only).
+_LABEL = re.compile(r"(?:Expected|Received) (?:substring|string|pattern|value)\b|unexpected value")
+_HEAD = r"(?:locator|frameLocator|frame_locator|get_by_\w+|getBy\w+)"
+_PRINTED = re.compile(r"(waiting for |strict mode violation:\s*)(?=" + _HEAD + r"\()")
+_CALL_AT = re.compile(r"(?<![\w.])(?:[A-Za-z_][\w.]*\.)?" + _HEAD + r"\(")
+_CHAIN = re.compile(r"\.(?:first|last|nth|filter|locator|frameLocator|frame_locator|and_|or_|and|or|get_by_\w+|getBy\w+)\(")
+_BARE = re.compile(r"\.(?:first|last)\b(?!\()")
+_STATES = ("visible", "enabled", "editable")
+_LINE_MAX = 2000
+_EXPR_MAX = 1500
+
+
+def _balanced(text: str, i: int) -> int:
+    """Index just past the parenthesis group opening at `text[i]`, strings skipped; -1 when it never closes."""
+    depth, n, j = 0, len(text), i
+    while j < n:
+        c = text[j]
+        if c in "'\"":
+            k = j + 1
+            while k < n and text[k] != c:
+                k += 2 if text[k] == "\\" else 1
+            j = k
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+        j += 1
+    return -1
+
+
+def _expression_end(text: str, start: int) -> int:
+    """End of the locator expression that starts at `start` (a head and its narrowing chain), or `start` when it is unclosed."""
+    open_at = text.find("(", start)
+    end = _balanced(text, open_at) if open_at >= 0 else -1
+    if end < 0:
+        return start
+    while end - start < _EXPR_MAX:
+        bare = _BARE.match(text, end)
+        if bare and _CHAIN.match(text, bare.end()):
+            end = bare.end()
+        m = _CHAIN.match(text, end)
+        if not m:
+            break
+        nxt = _balanced(text, m.end() - 1)
+        if nxt < 0:
+            break
+        end = nxt
+    return min(end, start + _EXPR_MAX)
+
+
+def redact_failure_text(error: str) -> str:
+    """The failure text reduced to what the service's triage reads, and nothing else on a line: `waiting for <locator>` and
+    `strict mode violation: <locator> resolved to N elements` keep the locator expression (and the state words of a wait),
+    `Timeout Nms exceeded` keeps only that phrase, an assertion line keeps its label, `locator resolved to <...>` keeps
+    `<element>`; the numbered element HTML of a strict-mode violation, code-frame source lines, `--showlocals` variables,
+    `Actual value:` and exception messages are dropped. When no printed locator survives, the locator call (receiver and call
+    only, no `.fill("secret")`) of the code-frame or source lines is kept, as it is the only signal that names the call."""
+    out: List[str] = []
+    calls: List[str] = []
+    printed = False
+    for raw in (error or "").splitlines():
+        line = raw[:_LINE_MAX]
+        if re.match(r"^\s*\d+\) <", line):                       # an element listing of a strict-mode violation
+            continue
+        m = _PRINTED.search(line)
+        if m:
+            end = _expression_end(line, m.end())
+            if end > m.end():
+                tail = line[end:]
+                states = [f"to be {st}" for st in _STATES if st in tail]
+                if m.group(1).startswith("strict"):
+                    n = re.search(r"resolved to (\d+) elements?", tail)
+                    out.append(f"strict mode violation: {line[m.end():end]}" + (f" resolved to {n.group(1)} elements" if n else ""))
+                else:
+                    out.append("waiting for " + line[m.end():end] + (" " + " ".join(states) if states else ""))
+                printed = True
+                continue
+        if re.search(r"waiting for ", line) and any(st in line.split("waiting for ", 1)[1] for st in _STATES):
+            out.append("waiting for " + " ".join(f"to be {st}" for st in _STATES if st in line.split("waiting for ", 1)[1]))
+            continue
+        res = re.search(r"locator resolved to <", line)
+        if res:
+            out.append(line[:res.end() - 1] + "<element>")
+            continue
+        lab = _LABEL.search(line)
+        if lab:
+            out.append(line[:lab.end()].strip() + ":")
+            continue
+        for phrase in (r"Timeout \d+ms exceeded", r"element\(s\) not found", r"Call log:"):
+            hit = re.search(phrase, line)
+            if hit:
+                out.append(hit.group(0))
+                break
+        else:
+            c = _CALL_AT.search(line)
+            if c:                                                  # a code-frame or source line: only its locator call
+                end = _expression_end(line, c.start())
+                if end > c.start():
+                    calls.append(line[c.start():end])
+    if not printed:
+        out += calls[:20]
+    return "\n".join(out) + ("\n" if out else "")
 
 
 def _clean_item(item: Any) -> Optional[Dict[str, Any]]:
@@ -174,8 +335,9 @@ def _clean_item(item: Any) -> Optional[Dict[str, Any]]:
                 out[key] = {k: value[k] for k in _BOX_KEYS}
             elif value is None:
                 out[key] = None
-        elif isinstance(value, bool):
-            out[key] = value
+        elif key in _BOOL_KEYS:
+            if isinstance(value, bool):
+                out[key] = value
         elif isinstance(value, str):
             out[key] = value[:_FIELD_MAX]
     return out
@@ -183,8 +345,9 @@ def _clean_item(item: Any) -> Optional[Dict[str, Any]]:
 
 def clean_inventory(items: Any) -> List[Dict[str, Any]]:
     """`items` (the probe's element list) keeping only allowlisted keys with plain values: a string (capped), a bool, or a
-    numeric box. Anything else, and every key named like a value or a credential, is dropped."""
+    numeric box. A flag key (disabled, hidden, pw_cut, ...) keeps only a real bool and every other key only a string. Anything
+    else, and every key named like a value or a credential, is dropped."""
     return [c for c in (_clean_item(i) for i in (items if isinstance(items, list) else [])) if c is not None]
 
 
-__all__ = ["INVENTORY_KEYS", "clean_inventory", "redact_typed_values"]
+__all__ = ["INVENTORY_KEYS", "clean_inventory", "redact_failure_text", "redact_typed_values", "scrub_texts"]

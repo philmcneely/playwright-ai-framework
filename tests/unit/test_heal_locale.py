@@ -79,17 +79,17 @@ class TestSignals:
         assert subtag(value) == expected
 
     def test_priority_html_lang_then_locale_then_content_language(self):
-        assert page_language("fr", "en", "de") == "fr"
-        assert page_language("", "en-GB", "de") == "en"
-        assert page_language(None, None, "de-AT") == "de"
-        assert page_language("", "", "") == ""
+        assert page_language("fr", "en") == "fr"
+        assert page_language("", "en-GB") == "en"
+        assert page_language(None, None) == ""            # Content-Language is not a signal
+        assert page_language("", "") == ""
 
 
 class TestTrackLanguage:
     def test_the_async_page_language_is_recorded_on_domcontentloaded(self):
         page = AsyncPage()
         track_language(page)
-        assert set(page.handlers) == {"response", "domcontentloaded"}
+        assert set(page.handlers) == {"domcontentloaded"}
         asyncio.run(page.handlers["domcontentloaded"]())
         assert page._heal_language == "fr" and by_language(page, BRANCHES) == FR
 

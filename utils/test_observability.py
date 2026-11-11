@@ -41,6 +41,12 @@ class TestMetric:
     branch: Optional[str] = None
     heal_event: bool = False
     heal_confidence: Optional[float] = None
+    heal_outcome: Optional[str] = None          # heal service advice: advised | needs_human | not_drift (None: none asked)
+    heal_id: Optional[str] = None
+    heal_strategy: Optional[str] = None
+    heal_tier_movement: Optional[str] = None
+    heal_calls: int = 0
+    heal_tokens: int = 0
     error_category: Optional[str] = None
     tags: Optional[list] = None
 
@@ -122,6 +128,7 @@ class TestObservabilityCollector:
         )
         total_duration = sum(m.duration_ms for m in self.metrics)
         heal_events = sum(1 for m in self.metrics if m.heal_event)
+        asked = [m for m in self.metrics if m.heal_outcome]
 
         failures_by_category: dict[str, int] = {}
         for m in self.metrics:
@@ -141,6 +148,9 @@ class TestObservabilityCollector:
             "total_duration_ms": total_duration,
             "avg_duration_ms": round(total_duration / total) if total else 0,
             "heal_events": heal_events,
+            "heal_advice": {k: sum(1 for m in asked if m.heal_outcome == k) for k in ("advised", "needs_human", "not_drift")},
+            "heal_calls": sum(m.heal_calls for m in asked),
+            "heal_tokens": sum(m.heal_tokens for m in asked),
             "pass_rate": round(passed / total * 100, 2) if total else 0,
             "flake_rate": round(flake_count / total * 100, 2) if total else 0,
             "slowest_tests": [
@@ -176,6 +186,8 @@ class TestObservabilityCollector:
 | Flake Count | {s["flake_count"]} |
 | Flake Rate | {s["flake_rate"]}% |
 | Heal Events | {s["heal_events"]} |
+| Heal Advice (advised / needs human / not drift) | {s["heal_advice"]["advised"]} / {s["heal_advice"]["needs_human"]} / {s["heal_advice"]["not_drift"]} |
+| Heal Service Tokens | {s["heal_tokens"]} in {s["heal_calls"]} call(s) |
 | Total Duration | {s["total_duration_ms"] / 1000:.1f}s |
 | Avg Duration | {s["avg_duration_ms"] / 1000:.1f}s |
 
@@ -213,6 +225,10 @@ class TestObservabilityCollector:
         )
         print(f"  Pass Rate: {s['pass_rate']}% | Flake Rate: {s['flake_rate']}%")
         print(f"  Heal Events: {s['heal_events']}")
+        a = s["heal_advice"]
+        if sum(a.values()):
+            print(f"  Heal Advice: {a['advised']} advised, {a['needs_human']} needs human, {a['not_drift']} not drift "
+                  f"({s['heal_tokens']} tokens)")
         print(
             f"  Duration: {s['total_duration_ms'] / 1000:.1f}s (avg {s['avg_duration_ms'] / 1000:.1f}s)"
         )

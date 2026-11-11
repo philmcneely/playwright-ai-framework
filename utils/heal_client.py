@@ -7,6 +7,9 @@ files and the framework's own safety checks, and nothing about models: no model 
 of a model reply live in this repository. The service picks the element and writes the locator; this client only
     - builds the request: the stack files under the source roots (capped, with sha256), the probe's element inventory of the
       reopened failing route, the aria snapshot, the language signals, the last green run's fingerprint and its neighbours
+    - with HEAL_VISION auto or on, takes ONE viewport screenshot of that same page (never full page) with the default masks
+      (password, card, one-time-code and secret-named fields, cross-origin frames) and the HEAL_MASK locators blacked out, and sends it with the viewport and scroll it was taken in; with off it never takes
+      one and sends null
     - checks every candidate in the live page BEFORE touching a file: the locator must match exactly one element and that
       element must be the one the service expects (the probe's `only` mode describes it; no code from the service is ever
       evaluated, the locator expression is walked and only approved Playwright calls with literal arguments are run)
@@ -16,9 +19,15 @@ of a model reply live in this repository. The service picks the element and writ
       try to the service so it can move to the next candidate
 
 Features:
-    ✓ HealSettings: HEAL_SERVICE_URL, HEAL_SERVICE_TOKEN, HEAL_VISION (accepted; this client never sends a screenshot),
-      HEAL_MASK (accepted, unused until vision), HEAL_TEST_ID_ATTRIBUTE, HEAL_SOURCE_ROOTS, HEAL_STORAGE_STATE, BASE_URL
-    ✓ ServiceClient: capabilities, probe.js (fetched once), heal, result; every failure is a HealServiceError that names the
+    ✓ HealSettings: HEAL_SERVICE_URL, HEAL_SERVICE_TOKEN, HEAL_VISION (off | auto | on), HEAL_MASK, HEAL_TEST_ID_ATTRIBUTE,
+      HEAL_SOURCE_ROOTS, HEAL_STORAGE_STATE, BASE_URL
+    ✓ Vision capture (LivePage.screenshot): off never calls Playwright's screenshot and the request carries `screenshot: null`,
+      so no image byte leaves; auto and on take one viewport PNG with `mask` on the defaults (password, card, one-time-code and secret-named fields, cross-origin
+      frames) and every HEAL_MASK
+      locator (black boxes), animations frozen and the caret hidden. The capture fails closed: any error while masking or
+      capturing, a file that is not a PNG or is over the service's 4 MB limit means no screenshot is sent, never an unmasked one.
+      The request then says `vision: off`
+    ✓ ServiceClient: capabilities, probe.js (fetched once), heal, result, followup; every failure is a HealServiceError that names the
       status and the service's reason, never the request
     ✓ Language signals: <html lang>, the browser locale and the Content-Language header of the page load
     ✓ Patch safety refusals: stale base hash, file outside the source roots or never sent, span that does not hold `from`,
@@ -26,8 +35,8 @@ Features:
     ✓ A service or browser error ends that heal as needs_human with the reason; it never crashes the run
     ✓ Language branches: the by_language helper (utils/heal_locale.py) is imported into a file that receives branch code
     ✓ Input values are never sent: the aria snapshot goes through heal_redact.redact_typed_values and the inventory is cut to
-      an allowlist of keys on THIS side, whatever the service or its probe promises; no cookie, storage state or screenshot
-      leaves the client
+      an allowlist of keys on THIS side, whatever the service or its probe promises; no cookie or storage state leaves the
+      client, and a screenshot only when HEAL_VISION asks for one
     ✓ Every service reply is untrusted: a replacement is one expression with no comment and no control character whose
       unparse round-trips; the original span must be a pure locator chain AND exactly one expression node of the file on
       disk; the code written is the code checked live (every also-patch is checked live too); a file is written in place
@@ -39,11 +48,18 @@ Features:
 Environment Variables:
     HEAL_SERVICE_URL: base URL of the heal service, for example http://localhost:8765
     HEAL_SERVICE_TOKEN: bearer token, when the service requires one
-    HEAL_VISION: off | auto | on (accepted; screenshots are not captured by this client, so it is always off)
-    HEAL_MASK: locators to mask in a screenshot (accepted, unused until vision)
+    HEAL_VISION: off | auto | on (default off). auto and on send one masked viewport screenshot; the service decides whether a
+        model ever sees it (auto: only when its text pick fails or is a close call; on: every heal) and only a service
+        configured to allow images sends it to a model. Anything else than auto or on is off
+    HEAL_MASK: CSS selectors (the strings you would pass to page.locator, so a comma inside one is fine) separated by newlines
+        or `;;`, blacked out in the screenshot in addition to the defaults: password inputs, card and one-time-code fields
+        (autocomplete), fields whose name or id contains pass, pwd, token, secret, ssn, card, cvv or otp, and every
+        cross-origin or sandboxed frame. The screenshot shows whatever the page shows: mask anything else sensitive
     HEAL_TEST_ID_ATTRIBUTE: the project's test id attribute (default data-testid)
     HEAL_SOURCE_ROOTS: comma separated source roots, relative paths inside the repository (default pages,tests,utils)
     HEAL_PROBE_FROM_SERVICE: "1" to fetch the probe from the service (used only when it is byte-identical to the vendored one)
+    HEAL_ALLOW_ORIGINS: extra origins the heal browser may load from (a CDN), exact `scheme://host[:port]` entries separated by
+      commas or spaces, no wildcards (default: only BASE_URL's origin)
     HEAL_ALLOW_INSECURE: "1" to send the bearer token over http:// to a host other than localhost
     HEAL_STORAGE_STATE: Playwright storage-state file used to open the page as a signed-in user (never sent)
     BASE_URL: the app under test (default http://localhost:7080)
@@ -52,12 +68,14 @@ Author: PMAC
 ===============================================================================
 """
 import ast
+import base64
 import hashlib
 import json
 import os
 import io
 import re
 import stat
+import struct
 import tokenize
 import unicodedata
 import uuid
@@ -67,15 +85,89 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
 from utils.heal_fingerprints import (call_key, heal_dir, last_pass_for, line_of, load_store, relative_under, source_roots)
 from utils.heal_locale import page_language
-from utils.heal_redact import clean_inventory, redact_typed_values
+from utils.heal_redact import clean_inventory, redact_failure_text, redact_typed_values, scrub_texts
 
-LIMITS = {"files": 20, "file_bytes": 256 * 1024, "aria_chars": 256 * 1024}
+LIMITS = {"files": 20, "file_bytes": 256 * 1024, "aria_chars": 256 * 1024, "screenshot_bytes": 4 * 1024 * 1024,
+          "screenshot_side": 8192}
+VISION_MODES = ("auto", "on")                       # HEAL_VISION values that take a screenshot; anything else is off
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+MASK_COLOR = "#000000"
+# Fields blacked out in every screenshot whatever HEAL_MASK says: passwords, card and one-time-code fields by autocomplete, and any
+# field whose name or id says it holds a secret (this also covers a password field a script turned into type=text, as long as it
+# kept a password-like name: the client cannot see what a field *used to be*).
+SECRET_TERMS = ("pass", "pwd", "token", "secret", "ssn", "card", "cvv", "otp")
+DEFAULT_MASK = ", ".join(
+    ['input[type="password" i]', 'input[autocomplete^="cc-" i]', 'input[autocomplete="one-time-code" i]',
+     'input[autocomplete*="password" i]', "[data-heal-mask]"]
+    + [f'{tag}[{attr}*="{term}" i]' for term in SECRET_TERMS for attr in ("name", "id") for tag in ("input", "textarea")])
+FRAME_SELECTOR = "iframe, frame, embed, object"
+# Remembers every input that is, or ever becomes, type=password (a show-password toggle makes it type=text). The memory is a WeakSet
+# in the page's own closure, reachable only through a non-configurable Symbol function: NO attribute is set on the DOM while the
+# probe, the aria snapshot or a candidate check runs. `markMasked(true)` (called only around the screenshot) sets data-heal-mask on
+# them and `markMasked(false)` removes it. The same script as the TypeScript client's.
+WAS_PASSWORD = """(() => {
+  const was = new WeakSet();
+  const nativeSet = Element.prototype.setAttribute;
+  const isPw = (el) => el instanceof HTMLInputElement && el.type === "password";
+  const note = (el) => was.add(el);
+  const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "type");
+  Object.defineProperty(HTMLInputElement.prototype, "type", { configurable: true, enumerable: d.enumerable, get: d.get,
+    set(v) { if (isPw(this) || String(v).toLowerCase() === "password") note(this); d.set.call(this, v); } });
+  Element.prototype.setAttribute = function (name, value) {
+    if (this instanceof HTMLInputElement && String(name).toLowerCase() === "type" && (isPw(this) || String(value).toLowerCase() === "password")) note(this);
+    return nativeSet.call(this, name, value);
+  };
+  const scan = (root) => { if (root.querySelectorAll) { if (isPw(root)) note(root); root.querySelectorAll("input").forEach((i) => isPw(i) && note(i)); } };
+  new MutationObserver((records) => { for (const r of records) { if (r.type === "attributes") isPw(r.target) && note(r.target); else r.addedNodes.forEach(scan); } })
+    .observe(document, { attributes: true, attributeFilter: ["type"], childList: true, subtree: true });
+  document.addEventListener("DOMContentLoaded", () => scan(document));
+  const marks = (root, out) => { root.querySelectorAll("input").forEach((i) => { if (isPw(i) || was.has(i)) out.push(i); });
+    root.querySelectorAll("*").forEach((e) => e.shadowRoot && marks(e.shadowRoot, out)); return out; };
+  Object.defineProperty(window, Symbol.for("heal.markMasked"), { configurable: false, enumerable: false, value: (on) => {
+    for (const el of marks(document, [])) on ? nativeSet.call(el, "data-heal-mask", "1") : el.removeAttribute("data-heal-mask");
+  } });
+})();"""
+MARK_MASKED_JS = "(on) => { const f = window[Symbol.for('heal.markMasked')]; if (f) f(on); }"
+CLEAR_EDITABLE_JS = """() => {
+  const clear = (root) => {
+    for (const el of root.querySelectorAll("[contenteditable]:not([contenteditable=false i])")) el.textContent = "";
+    for (const el of root.querySelectorAll("*")) if (el.shadowRoot) clear(el.shadowRoot);
+  };
+  clear(document);
+}"""
+_INHERITING_URLS = ("", "about:blank", "about:srcdoc")     # a document with no origin of its own takes its parent's
+
+
+def _origin(url: str) -> Optional[Tuple[str, str, int]]:
+    """(scheme, lower-case host, port) of an http(s) or ws(s) url (ws is http and wss is https: a socket to the page's own host is
+    the page's own origin), None for anything else: data:, blob:, javascript:, about:, chrome-error:, no host, unparseable."""
+    try:
+        parts = urlsplit(url or "")
+        scheme = {"ws": "http", "wss": "https"}.get(parts.scheme.lower(), parts.scheme.lower())
+        host = (parts.hostname or "").lower()
+        port = parts.port or {"http": 80, "https": 443}.get(scheme, 0)
+    except ValueError:
+        return None
+    return (scheme, host, port) if scheme in ("http", "https") and host else None
+
+
+def _foreign(frame: Any, page_origin: Optional[Tuple[str, str, int]], main: Any) -> bool:
+    """Whether the document a LIVE frame holds now is not this page's origin: judged from frame.url after every redirect and
+    script navigation, never from the iframe's src attribute. about:blank and srcdoc inherit the parent's origin, so they are
+    foreign only when the parent is; anything unparseable, or a page whose own origin is unknown, is foreign."""
+    if frame is main:
+        return False
+    if (frame.url or "").lower() in _INHERITING_URLS:
+        parent = getattr(frame, "parent_frame", None)
+        return True if parent is None else _foreign(parent, page_origin, main)
+    origin = _origin(frame.url)
+    return origin is None or page_origin is None or origin != page_origin
 HELPER = "by_language"
 HELPER_IMPORT = "from utils.heal_locale import by_language"
 
@@ -86,11 +178,78 @@ ALLOWED_LOCATOR_METHODS = {
     "get_by_test_id", "get_by_alt_text", "get_by_title", "first", "last", "nth", "filter",
 }
 _LANG_KEY = re.compile(r"^[a-z]{2,3}$")
+# A selector the client will not run, the same list as the TypeScript client's PROBING_SELECTOR. The service writes plain CSS only
+# (`#id`, `[attr=value]`, `tag[data-x="y"]`, a row scope then a child): never another engine (`xpath=`, `css=`, `text=`, `role=`,
+# `id=`, `data-testid=`, `internal:`), a `>>` chain, an xpath, a backslash escape (a CSS escape such as `[\76 alue=x]` spells a
+# banned name), a comment, or an operator that reads a value back one character at a time (prefix, suffix, substring, word or
+# dash match, any selector on `value`, `:has-text`, `:text*`, `:nth-match`, hidden inputs).
+PROBING_SELECTOR = re.compile("|".join([
+    r"\[\s*[^\]=\s]+\s*[\^*$~|]=", r"\[\s*value\s*[\^*$~|]?=", ":has-text", ":text", ":nth-match", r"""\btype\s*=\s*["']?hidden""",
+    r">>", "internal:", r"\\", r"/\*", r"^\s*[A-Za-z][\w-]*\s*=", r"^\s*\(?\s*(?:\/\/|\.\.)",
+    r"\[\s*(?:default)?value\b",                     # beyond the TypeScript list: `[value]` and `[defaultValue=...]` read a value too
+]), re.I)
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 _NETWORK_SCHEMES = {"http", "https", "ws", "wss"}
-_BAD_CATEGORIES = {"Cc", "Cf", "Zl", "Zp"}              # control, format (bidi), line and paragraph separators
+_BAD_CATEGORIES = {"Cc", "Cf", "Cs", "Zl", "Zp"}        # control, format (bidi), lone surrogate, line and paragraph separators
 PROBE_FILE = Path(__file__).with_name("heal_probe.js")
+MAX_LEFT_OUT = 1_000_000                                # a count of elements the probe left out is never trusted past this
+
+
+def count_left_out(value: Any) -> int:
+    """A probe count of copy it left out of the listing (`copy_more`, `copy_withheld`, `copy_withheld_data`): a whole number >= 0,
+    capped at what the service accepts; anything else is 0."""
+    return min(value, MAX_LEFT_OUT) if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+# The text of the page's contenteditable regions: Playwright prints it as plain `- text:` lines in the aria snapshot, so it is
+# read here only to be cut out of that snapshot (utils/heal_redact.scrub_texts); it is never sent.
+EDITABLE_TEXTS_JS = """() => {
+  const out = [];
+  const walk = (root) => {
+    for (const el of root.querySelectorAll('*')) {
+      if (el.isContentEditable && el.getAttribute('contenteditable') !== null) out.push(el.innerText || el.textContent || '');
+      if (el.shadowRoot) walk(el.shadowRoot);              // open shadow roots; a closed one cannot be read by anyone
+    }
+  };
+  walk(document);
+  return out.filter(Boolean).slice(0, 50);
+}"""
+# every frame of the page is asked (Playwright can run it in a cross-origin frame too): iframes print into the aria snapshot
+
+
+def editable_texts(page: Any) -> List[str]:
+    """The text of the contenteditable regions of a sync page: its main frame, its iframes and their open shadow roots."""
+    out: List[str] = []
+    for frame in list(getattr(page, "frames", None) or [page])[:20]:
+        try:
+            out += [t for t in (frame.evaluate(EDITABLE_TEXTS_JS) or []) if isinstance(t, str)]
+        except Exception:
+            continue
+    return out
+
+
+async def editable_texts_async(page: Any) -> List[str]:
+    """editable_texts for an async page."""
+    out: List[str] = []
+    for frame in list(getattr(page, "frames", None) or [page])[:20]:
+        try:
+            out += [t for t in (await frame.evaluate(EDITABLE_TEXTS_JS) or []) if isinstance(t, str)]
+        except Exception:
+            continue
+    return out
 _TRACE_LINE = re.compile(r"^\s*(\S+?\.py):(\d+)\b", re.M)
+
+
+_ORIGIN = re.compile(r"(https?|wss?)://(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?)(?::([0-9]{1,5}))?")
+
+
+def parse_origins(value: str) -> Tuple[str, ...]:
+    """HEAL_ALLOW_ORIGINS as exact origins: `scheme://host[:port]` entries separated by commas or spaces. A wildcard, a path, a
+    query or anything else is dropped, never widened: an origin is either named in full or not allowed."""
+    out = []
+    for item in re.split(r"[,\s]+", value or ""):
+        m = _ORIGIN.fullmatch(item)
+        if m and (m.group(3) is None or int(m.group(3)) <= 65535) and item.lower() not in out:
+            out.append(item.lower())
+    return tuple(out)
 
 
 # ---- settings --------------------------------------------------------------------------------------------------------
@@ -105,6 +264,7 @@ class HealSettings:
     roots: Tuple[str, ...] = ("pages", "tests", "utils")
     storage_state: Optional[str] = None
     base_url: str = "http://localhost:7080"
+    allow_origins: Tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls, env: Optional[Dict[str, str]] = None) -> "HealSettings":
@@ -112,10 +272,11 @@ class HealSettings:
         attr = env.get("HEAL_TEST_ID_ATTRIBUTE", "data-testid").strip().lower()
         return cls(url=env.get("HEAL_SERVICE_URL", "").strip().rstrip("/"), token=env.get("HEAL_SERVICE_TOKEN", "").strip(),
                    vision=env.get("HEAL_VISION", "off").strip().lower() or "off",
-                   mask=[m.strip() for m in env.get("HEAL_MASK", "").split(",") if m.strip()],
+                   mask=[m.strip() for m in re.split(r"\n|;;", env.get("HEAL_MASK", "")) if m.strip()],
                    test_id_attribute=attr if re.fullmatch(r"[a-z][a-z0-9-]{0,63}", attr) else "data-testid",
                    roots=source_roots(env), storage_state=env.get("HEAL_STORAGE_STATE") or None,
-                   base_url=env.get("BASE_URL", "http://localhost:7080"))
+                   base_url=env.get("BASE_URL", "http://localhost:7080"),
+                   allow_origins=parse_origins(env.get("HEAL_ALLOW_ORIGINS", "")))
 
 
 # ---- the service -----------------------------------------------------------------------------------------------------
@@ -152,9 +313,10 @@ class ServiceClient:
             raise HealServiceError("refusing to send the bearer token over http:// to a host other than localhost "
                                    "(use https://, or set HEAL_ALLOW_INSECURE=1)")
         try:
-            resp = self.http.request(method, self.base + path, headers=self.headers,
+            headers = {**self.headers, "Content-Type": "application/json"} if method == "POST" else self.headers
+            resp = self.http.request(method, self.base + path, headers=headers,
                                      content=json.dumps(body).encode() if body is not None else None)
-        except httpx.HTTPError as e:
+        except (httpx.HTTPError, httpx.InvalidURL) as e:
             raise HealServiceError(f"the heal service could not be reached ({type(e).__name__})") from None
         if resp.status_code >= 400:
             try:
@@ -194,14 +356,26 @@ class ServiceClient:
     def heal(self, request: Dict[str, Any]) -> Dict[str, Any]:
         return self._json(self._call("POST", "/v1/heal", request))
 
+    @staticmethod
+    def _id(heal_id: Any) -> str:
+        """A heal id as a path segment: the service's own shape (`h_` and letters or digits), matched in full, because the id
+        came from a reply or a record file and must not add a path, a query or a control character to a request."""
+        if not isinstance(heal_id, str) or not re.fullmatch(r"h_[A-Za-z0-9]{1,64}", heal_id):
+            raise HealServiceError("the heal id is not in the service's shape")
+        return heal_id
+
     def result(self, heal_id: str, report: Dict[str, Any]) -> Dict[str, Any]:
-        return self._json(self._call("POST", f"/v1/heals/{heal_id}/result", report))
+        return self._json(self._call("POST", f"/v1/heals/{self._id(heal_id)}/result", report))
+
+    def followup(self, heal_id: str, report: Dict[str, Any]) -> Dict[str, Any]:
+        """What happened to a healed locator after its PR (see utils/heal_followup.py)."""
+        return self._json(self._call("POST", f"/v1/heals/{self._id(heal_id)}/followup", report))
 
 
 # ---- the locator validator (a second check on everything the service sends) -------------------------------------------
 def _has_control(text: str) -> bool:
     """True when `text` holds a control character (a carriage return, form feed, tab, NUL, C1), a bidi or other format
-    character, or a line or paragraph separator: anything that can hide or end a line differently from how it reads."""
+    character, a lone surrogate (it cannot be written as UTF-8), or a line or paragraph separator: anything that can hide or end a line differently from how it reads."""
     return any(unicodedata.category(c) in _BAD_CATEGORIES for c in text)
 
 
@@ -294,6 +468,11 @@ def validate_replacement(proposed, original):
             for arg in [*node.args, *(k.value for k in node.keywords)]:
                 if not isinstance(arg, ast.Constant):
                     return None
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "locator":
+                for arg in [*node.args, *(k.value for k in node.keywords)]:       # `locator(selector=...)` too
+                    if isinstance(arg.value, str) and PROBING_SELECTOR.search(arg.value):
+                        return None
+
         elif not isinstance(node, (ast.Name, ast.Constant, ast.Load, ast.keyword)):
             return None
     return proposed
@@ -381,6 +560,8 @@ def build_locator(page: Any, expression: str) -> Any:
             kwargs = {k.arg: k.value.value for k in n.keywords if k.arg and isinstance(k.value, ast.Constant)}
             if len(args) != len(n.args) or len(kwargs) != len(n.keywords):
                 raise ValueError("non-literal argument")
+            if f.attr == "locator" and any(isinstance(v, str) and PROBING_SELECTOR.search(v) for v in (*args, *kwargs.values())):
+                raise ValueError("unsafe selector")           # every expression run on the live page passes through here
             return getattr(walk(f.value), f.attr)(*args, **kwargs)
         if isinstance(n, ast.Attribute):
             if n.attr in ("first", "last"):
@@ -467,6 +648,19 @@ def collect_source(stack: List[Dict[str, Any]], roots: Tuple[str, ...], root: Pa
     return files
 
 
+def safe_route(route: Any, base_url: str) -> str:
+    """`route` when it is a path on BASE_URL's own origin: one leading slash, no scheme, no `//`, no backslash, no control
+    character, and a URL that resolves (joined onto BASE_URL) to BASE_URL's origin. Anything else is a ValueError: the route
+    comes from a cache file or the source, and must never send the browser (with its storage state) to another site."""
+    if not isinstance(route, str) or not route.startswith("/") or route.startswith("//") or "\\" in route or _has_control(route) \
+            or len(route) > 2000:
+        raise ValueError("the page route is not a plain path on the app under test")
+    here = _origin(base_url)
+    if here is None or _origin(urljoin(base_url.rstrip("/") + "/", route)) != here:
+        raise ValueError("the page route leaves the app under test")
+    return route
+
+
 def route_from_source(content: str) -> str:
     """The page route a page object's `self.url = f"{BASE_URL}/path"` names; "/" when it names none."""
     m = re.search(r'self\.url\s*=\s*f?["\'][^"\']*BASE_URL\}?([^"\']*)["\']', content)
@@ -480,23 +674,56 @@ def client_version(root: Path) -> str:
         return ""
 
 
+def vision_mode(settings: HealSettings) -> str:
+    """HEAL_VISION as the client acts on it: auto, on, or off for anything else."""
+    return settings.vision if settings.vision in VISION_MODES else "off"
+
+
+def png_screenshot(data: Any) -> Optional[Dict[str, Any]]:
+    """The wire form of a screenshot, {media_type, data (base64), width, height}, or None when `data` is not a PNG the service
+    would take: not bytes, not a PNG, a side over 8192 px or over 4 MB. The size is read from the PNG, never assumed."""
+    if not isinstance(data, (bytes, bytearray)) or len(data) > LIMITS["screenshot_bytes"] or len(data) < 33:
+        return None
+    if bytes(data[:8]) != PNG_SIGNATURE or bytes(data[12:16]) != b"IHDR":
+        return None
+    width, height = struct.unpack(">II", bytes(data[16:24]))
+    if not (1 <= width <= LIMITS["screenshot_side"] and 1 <= height <= LIMITS["screenshot_side"]):
+        return None
+    return {"media_type": "image/png", "data": base64.b64encode(bytes(data)).decode("ascii"), "width": width, "height": height}
+
+
 def build_request(failure: Dict[str, Any], files: List[Dict[str, str]], stack: List[Dict[str, Any]], page: Dict[str, Any],
                   settings: HealSettings, root: Path, last_pass: Optional[Dict[str, Any]] = None,
-                  run_id: Optional[str] = None) -> Dict[str, Any]:
-    """The POST /v1/heal body. `page` is a LivePage snapshot: path, language signals, inventory, aria, viewport.
-    No screenshot is ever included (vision is off), and no input value: the inventory comes from the probe."""
+                  run_id: Optional[str] = None, mode: str = "heal") -> Dict[str, Any]:
+    """The POST /v1/heal body. `page` is a LivePage snapshot: path, language signals, inventory, aria, viewport and, when the
+    client took one, `screenshot` (wire form). A screenshot is included only when HEAL_VISION is auto or on and one was
+    captured; then `options.vision` is that mode and the viewport carries the scroll offset the boxes need. Otherwise the
+    screenshot is null and vision is off. No input value is ever included: the inventory comes from the probe, and the
+    failure text is cut to the lines the service's triage reads (utils/heal_redact.redact_failure_text), so no assertion
+    value, local variable, element HTML or source line of a code frame travels. `mode` "advise" asks for the decision and
+    the best locator with no patch (utils/heal_advise.py)."""
     req: Dict[str, Any] = {
         "client": {"framework": "playwright-ai-framework", "language": "python", "version": client_version(root)},
         "test": {"id": junit_test_id(failure.get("classname", ""), failure["name"], root), "title": failure["name"][:500]},
-        "failure": {"error": (failure.get("error") or "")[:100_000], "stack": stack},
+        "failure": {"error": redact_failure_text((failure.get("error") or "")[:100_000]), "stack": stack},
         "source": {"roots": list(settings.roots), "files": files},
         "page": {"url": page["path"], "language": page["language"], "inventory": page["inventory"],
-                 "inventory_more": page["more"], "viewport": page["viewport"], "screenshot": None},
+                 "inventory_more": page["more"], "inventory_copy_more": count_left_out(page.get("copy_more")),
+                 "inventory_copy_withheld": count_left_out(page.get("copy_withheld")),
+                 "inventory_copy_withheld_data": count_left_out(page.get("copy_withheld_data")),
+                 "viewport": page["viewport"], "screenshot": None},
         "options": {"vision": "off", "max_rounds": 3, "locale_branching": True},
         "test_id_attribute": settings.test_id_attribute,
         "run": {"id": run_id or uuid.uuid4().hex[:12]},
     }
+    if mode != "heal":
+        req["options"]["mode"] = mode
     req["page"]["inventory"] = clean_inventory(page["inventory"])          # allowlisted keys only, never a value
+    shot = page.get("screenshot") if vision_mode(settings) != "off" else None
+    if shot:
+        req["page"]["screenshot"] = shot
+        req["options"]["vision"] = vision_mode(settings)
+        req["page"]["viewport"] = {**(page.get("viewport") or {}), "scroll": page.get("scroll") or {"x": 0, "y": 0}}
     aria = redact_typed_values(page["aria"]) if isinstance(page.get("aria"), str) else ""
     if aria and len(aria) <= LIMITS["aria_chars"]:
         req["page"]["aria_snapshot"] = aria
@@ -681,64 +908,67 @@ def _box_free(item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def match_ref(inventory: List[Dict[str, Any]], facts: Dict[str, Any]) -> Optional[str]:
-    """The inventory ref of the element the probe described in `facts`: an exact match on everything the probe listed, else
-    one that ignores box, frame and shadow. None when no entry or several entries fit (the hit cannot be named)."""
+    """The inventory ref of the element the probe described in `facts`: an exact match on everything the probe listed (box
+    included). None when no entry or several entries fit, so a near miss never names an element (the hit cannot be named
+    and the service learns nothing from it)."""
     plain = {k: v for k, v in facts.items() if k != "ref"}
     exact = [e["ref"] for e in inventory if {k: v for k, v in e.items() if k != "ref"} == plain]
-    if len(exact) == 1:
-        return exact[0]
-    loose = [e["ref"] for e in inventory if _box_free(e) == _box_free(facts)]
-    return loose[0] if len(loose) == 1 else None
-
-
-def _origin(url: str) -> Tuple[str, str, int]:
-    parts = urlsplit(url)
-    scheme = parts.scheme.lower()
-    try:
-        port = parts.port or {"http": 80, "https": 443, "ws": 80, "wss": 443}.get(scheme, 0)
-    except ValueError:
-        port = -1
-    return scheme, (parts.hostname or "").lower(), port
+    return exact[0] if len(exact) == 1 else None
 
 
 class OriginGuard:
-    """Playwright route handler: while `probing` is True, a request to an origin other than BASE_URL's is aborted, so the
-    probe (or anything a page wires to run while it is evaluated) cannot send what it reads to another site. Outside a
-    probe every request goes through untouched."""
+    """Playwright route handler: a request to an origin other than BASE_URL's is aborted for the whole session, the first
+    navigation included, so neither the page nor the probe nor anything a page wires up can send what it reads to another
+    site. (A page's third-party scripts and fonts are therefore not loaded during a heal; the inventory is of the page's own
+    content.) `active()` is kept for callers that wrap a probe in it: the guard no longer depends on it."""
 
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str, allow: Tuple[str, ...] = ()):
         self.origin = _origin(base_url)
-        self.probing = False
+        self.allowed = {o for o in (self.origin, *(_origin(a) for a in allow)) if o is not None}   # BASE_URL's origin + HEAL_ALLOW_ORIGINS
+        self.probing = True
 
     def handle(self, route: Any, request: Any = None) -> None:
         url = (request or route.request).url
-        foreign = urlsplit(url).scheme.lower() in _NETWORK_SCHEMES and _origin(url) != self.origin
+        foreign = self.foreign(url)
         try:
-            if self.probing and foreign:
+            if foreign:
                 route.abort()
             else:
                 route.continue_()
         except Exception:                                      # the page closed under the route
             pass
 
+    def foreign(self, url: str) -> bool:
+        """Whether a request to `url` leaves the allowed origins. A network scheme with an origin we cannot read is foreign."""
+        if urlsplit(url).scheme.lower() not in _NETWORK_SCHEMES:
+            return False
+        return _origin(url) not in self.allowed
+
+    def handle_websocket(self, ws: Any) -> None:
+        """Playwright WebSocket route handler: a socket to a foreign origin is closed, any other is connected to the server."""
+        try:
+            if self.foreign(ws.url):
+                ws.close()
+            else:
+                ws.connect_to_server()
+        except Exception:                                      # the page closed under the route
+            pass
+
     @contextmanager
     def active(self) -> Iterator[None]:
-        self.probing = True
-        try:
-            yield
-        finally:
-            self.probing = False
+        yield
 
 
 class LivePage:
     """A fresh Chromium on the failing route (HEAL_STORAGE_STATE when set). It stays open for the whole heal so each
-    candidate can be checked on the same page the inventory came from. Never screenshots."""
+    candidate can be checked on the same page the inventory came from. It screenshots only when HEAL_VISION asks, once, as a
+    masked viewport shot (see `screenshot`)."""
 
     def __init__(self, settings: HealSettings, route: str, probe: str):
         self.settings, self.route, self.probe = settings, route or "/", probe
         self.inventory: List[Dict[str, Any]] = []
         self.language = ""
-        self.guard = OriginGuard(settings.base_url)
+        self.guard = OriginGuard(settings.base_url, settings.allow_origins)
         self._p = self._browser = self.page = None
 
     def __enter__(self) -> "LivePage":
@@ -747,9 +977,11 @@ class LivePage:
         try:
             self._browser = self._p.chromium.launch()
             ctx = self._browser.new_context(
-                base_url=self.settings.base_url,
+                base_url=self.settings.base_url, service_workers="block",       # a service worker would answer outside the guard
                 **({"storage_state": self.settings.storage_state} if self.settings.storage_state else {}))
+            ctx.add_init_script(WAS_PASSWORD)
             ctx.route("**/*", self.guard.handle)
+            ctx.route_web_socket("**/*", self.guard.handle_websocket)       # a page's own sockets are inside the guard too
             self.page = ctx.new_page()
             self._response = self.page.goto(self.route)
         except BaseException:
@@ -770,24 +1002,70 @@ class LivePage:
         with self.guard.active():
             data = self.page.evaluate(self.probe)
         meta = data.get("page") or {}
-        header = None
-        try:
-            header = self._response.headers.get("content-language") if self._response else None
-        except Exception:
-            pass
         self.inventory = clean_inventory([{**item, "ref": f"e{i}"} for i, item in enumerate(data.get("items") or [])
                                           if isinstance(item, dict)])
-        self.language = page_language(meta.get("lang"), meta.get("browser_lang"), header)
+        # <html lang>, then the browser locale: the two signals the by_language helper can read in the page at any time, so the
+        # branch checked here is the branch the verify re-run picks. Content-Language is not used (the helper cannot see it).
+        self.language = page_language(meta.get("lang"), meta.get("browser_lang"))
         try:
             with self.guard.active():
-                aria = redact_typed_values(self.page.locator("body").aria_snapshot())
+                editable = editable_texts(self.page)
+                aria = scrub_texts(redact_typed_values(self.page.locator("body").aria_snapshot()), editable)
         except Exception:
             aria = None
         view = meta.get("viewport") or {}
+        scroll = meta.get("scroll") or {}
         return {"path": urlsplit(self.page.url).path or "/", "inventory": self.inventory, "more": int(data.get("more") or 0),
+                "copy_more": count_left_out(data.get("copy_more")),
+                "copy_withheld": count_left_out(data.get("copy_withheld")),
+                "copy_withheld_data": count_left_out(data.get("copy_withheld_data")),
                 "aria": aria, "viewport": {"w": view.get("width"), "h": view.get("height"), "dpr": meta.get("dpr")},
+                "scroll": {"x": max(0, scroll.get("x") or 0), "y": max(0, scroll.get("y") or 0)},
                 "language": {"html_lang": meta.get("lang") or None, "browser_locale": meta.get("browser_lang") or None,
-                             "content_language": header}}
+                             "content_language": None}}
+
+    def screenshot(self) -> Optional[Dict[str, Any]]:
+        """ONE viewport screenshot in wire form, or None. With HEAL_VISION off Playwright is never asked for one. Otherwise the
+        shot is the viewport only (never full_page: a late scroll restore shifts the page), with a black box over DEFAULT_MASK
+        in the page and in every frame, over every frame element whole whose live document is another origin (or sandboxed), and over every HEAL_MASK
+        locator; animations frozen and the caret hidden. Any failure, including a mask that cannot be resolved, returns
+        None: an unmasked screenshot is never the fallback. What is not masked is on the picture: it shows whatever the page
+        shows."""
+        if vision_mode(self.settings) == "off":
+            return None
+        try:
+            targets = [self.page, *[f for f in self.page.frames if f is not self.page.main_frame]]
+            for frame in self.page.frames:                       # what a person typed into an editable region is on the picture
+                frame.evaluate(CLEAR_EDITABLE_JS)
+            masks = [t.locator(DEFAULT_MASK) for t in targets]
+            page_origin = _origin(self.page.url)
+            for t in targets:
+                embedded = t.locator(FRAME_SELECTOR)
+                for i in range(embedded.count()):
+                    element = embedded.nth(i)
+                    handle = element.element_handle(timeout=2000)
+                    child, sandbox = handle.content_frame(), handle.get_attribute("sandbox")
+                    opaque = sandbox is not None and "allow-same-origin" not in sandbox
+                    if child is None or opaque or _foreign(child, page_origin, self.page.main_frame):
+                        masks.append(element)
+            masks += [self.page.locator(selector) for selector in self.settings.mask]
+            self._mark_masked(True)                              # inputs that were ever type=password: an attribute, only now
+            try:
+                with self.guard.active():
+                    data = self.page.screenshot(type="png", mask=masks, mask_color=MASK_COLOR, animations="disabled", caret="hide")
+            finally:
+                self._mark_masked(False)
+        except Exception:
+            return None
+        return png_screenshot(data)
+
+    def _mark_masked(self, on: bool) -> None:
+        for frame in self.page.frames:
+            try:
+                frame.evaluate(MARK_MASKED_JS, on)
+            except Exception:
+                if on:
+                    raise                                         # a frame that cannot be marked cannot be trusted masked
 
     def check(self, expression: str) -> Tuple[Optional[int], Optional[str]]:
         """(match count, inventory ref of the one element hit). The ref is None unless the count is 1 and the element can
@@ -805,6 +1083,22 @@ class LivePage:
 
 
 # ---- the heal loop ---------------------------------------------------------------------------------------------------
+def last_pass_of(root: Path, stack: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The last green run's fingerprint of the failing line (the stack's innermost frame) with the page it was on under
+    `_page`, or None when nothing was recorded for that line."""
+    if not stack:
+        return None
+    top = stack[0]
+    text = line_of(root, top["file"], top["line"])
+    store = load_store(heal_dir(root) / "fingerprints.json")
+    key = call_key(top["file"], text)
+    lp = last_pass_for(store, key) if text else None
+    if lp is None:
+        return None
+    lp["_page"] = store["entries"][key].get("page") or "/"
+    return lp
+
+
 def _expression_for(candidate: Dict[str, Any], language: str) -> Optional[str]:
     """The locator expression to check live: the candidate's code, or for branch code the branch of the page's language."""
     branches = candidate.get("branches")
@@ -846,13 +1140,21 @@ class Healer:
         route = last_pass.pop("_page") if last_pass else None
         if route is None:
             route = route_from_source(files[0]["content"]) if files else "/"
+        route = safe_route(route, self.settings.base_url)
         probe = self.service.probe_js()
         kept: List[PlannedFile] = []
         with self.live_factory(route, probe) as live:
             snap = live.snapshot()
+            if vision_mode(self.settings) != "off":                 # off: the page is never asked for a screenshot
+                snap = {**snap, "screenshot": live.screenshot() if hasattr(live, "screenshot") else None}
             request = build_request(failure, files, stack, snap, self.settings, self.root, last_pass, self.run_id)
             resp = self.service.heal(request)
+            rounds = 0
             while resp.get("status") == "try" and resp.get("candidate"):
+                if rounds >= request["options"]["max_rounds"]:        # the service asked for more than the client allowed
+                    return {**self._decision(resp, []), "outcome": "needs_human", "reason": "max_rounds",
+                            "why": f"the service offered more than {rounds} candidates; the client stops at its own limit"}
+                rounds += 1
                 resp, kept = self._try(failure, resp, live, sent, live.language)
                 if kept:
                     break
@@ -860,17 +1162,7 @@ class Healer:
 
     def _last_pass(self, stack: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """The last green run's fingerprint of the failing line (with the page it was on), or None."""
-        if not stack:
-            return None
-        top = stack[0]
-        text = line_of(self.root, top["file"], top["line"])
-        store = load_store(heal_dir(self.root) / "fingerprints.json")
-        key = call_key(top["file"], text)
-        lp = last_pass_for(store, key) if text else None
-        if lp is None:
-            return None
-        lp["_page"] = store["entries"][key].get("page") or "/"
-        return lp
+        return last_pass_of(self.root, stack)
 
     def _try(self, failure: Dict[str, Any], resp: Dict[str, Any], live: Any, sent: Dict[str, str],
              language: str) -> Tuple[Dict[str, Any], List[PlannedFile]]:
@@ -881,14 +1173,22 @@ class Healer:
         expression = _expression_for(cand, language)
         if expression is None:
             return self._report(heal_id, {"count": None, "error": "no branch for the page's language"}), []
-        if not cand.get("branches") and check_replacement(expression, cand["patch"]["from"]):
+        if cand.get("branches"):
+            # the page-language branch is checked on its own like a plain locator; the branch that IS the failing call (the old
+            # language) is the file's own code and is allowed to equal it
+            same = _normal(expression) == _normal(cand["patch"]["from"])
+            unsafe = validate_replacement(expression, cand["patch"]["from"]) is None and not same
+        else:
+            unsafe = bool(check_replacement(expression, cand["patch"]["from"]))
+        if unsafe:
             return self._report(heal_id, {"count": None, "error": "the locator is not a safe expression"}), []
         if not cand.get("branches") and _normal(cand["patch"]["to"]) != _normal(expression):
             return self._report(heal_id, {"count": None, "error": "the patch is not the locator that was checked"}), []
         count, ref = live.check(expression)
         if count != 1 or ref != expected:                      # nothing has been edited yet
-            report: Dict[str, Any] = {"count": count}
-            if ref:
+            # a coarse count only: 0, 1 or 2 (meaning "more"), so the service cannot read how many elements a page holds
+            report: Dict[str, Any] = {"count": None if count is None else min(count, 2)}
+            if ref and ref in {i.get("ref") for i in (getattr(live, "inventory", None) or [])}:      # only an entry we sent
                 report["hit"] = {"ref": ref}
             return self._report(heal_id, report), []
         try:
@@ -977,5 +1277,5 @@ def run_total(decisions: List[Dict[str, Any]]) -> Dict[str, int]:
 
 
 __all__ = ["HealSettings", "HealServiceError", "ServiceClient", "Healer", "LivePage", "PatchRefused", "build_locator",
-           "build_request", "check_replacement", "collect_source", "match_ref", "plan_patches", "run_total",
+           "build_request", "check_replacement", "collect_source", "last_pass_of", "match_ref", "plan_patches", "run_total",
            "stack_from_error", "junit_test_id", "validate_replacement"]

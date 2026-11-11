@@ -131,7 +131,7 @@ HTTP + JSON, versioned under `/v1`. One heal is a short conversation: the client
 
 `source.files` holds only the files named in the failing call stack that sit under `source.roots`, so the page-object file always rides along when a page-object method failed. Caps: 20 files, 256 KB each. The service parses them (Python `ast`, TypeScript via a TS parser), finds the one broken call, and sees every other use of that locator, so one page-object fix covers every test that shares it.
 
-- `page.screenshot` is `{"png_base64": "…"}` when vision is allowed, else `null`. Masked fields (passwords, anything the client marks) are blacked out by the client before sending.
+- `page.screenshot` is `{"media_type": "image/png", "data": "<base64>", "width": <px>, "height": <px>}` when vision is allowed, else `null` (width and height are the PNG's own, in device pixels; the service refuses a file that is not a PNG, is over 4 MB decoded, or whose size differs from what is claimed). `page.viewport` then also carries `scroll: {x, y}`, the CSS-pixel scroll offset when the shot was taken, because inventory boxes are in document coordinates. Masked fields (passwords, anything the client marks) are blacked out by the client before sending.
 - `last_pass` is optional. When present, the service can reject a candidate that lands on a different element than the passing run used.
 - Input `value` attributes are never sent. The service refuses a request that carries any.
 
@@ -375,5 +375,6 @@ Each phase ships as a PR to the repo it touches, reviewed before merge. Phases 1
 - **Decided (2026-11-05):** the fingerprint file is not committed by default (see Client integration).
 - **Decided (2026-11-05):** the client sends the project's test-id attribute (default `data-testid`), so `get_by_test_id` is only written when it matches what the project configures.
 - **Decided (2026-11-05):** in phase 1, a heal whose only unique locator is structural or positional ends `needs_human` instead of writing one.
-- **Open:** the license, chosen before the repo goes public.
-- **Open:** one shared service instance for a team, or one per developer by default. The spec supports both. This only changes the docs and the default bind address.
+- **Decided (2026-11-08):** the service stays private for now; the license is chosen when it goes public.
+- **Decided (2026-11-08):** one service per developer is the documented default (bound to `127.0.0.1`, no token, next to the tests). A shared team instance is the documented option: bind wider with `--allow-remote` and a token, behind TLS.
+- **Decided (2026-11-08):** component-library class names (for example `MuiSelect-select`) are an opt-in locator source (`HEAL_LIBRARY_CLASSES`), off by default and ranked below test ids and plain `data-*` hooks.

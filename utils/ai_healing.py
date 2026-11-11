@@ -3,6 +3,12 @@
 AI Healing Service for Playwright Tests Using Ollama Model
 ===============================================================================
 
+DEPRECATED. Nothing in the framework calls this module any more: `conftest.py` now posts a final
+locator failure to the heal service in advise mode (utils/heal_advise.py, HEAL_ADVISE=on with
+HEAL_SERVICE_URL), and the service owns every model call. The framework is meant to hold no model
+URL, model name, prompt or reply parsing, so this file is kept only until it is removed in a later
+change (its parser tests still pass); do not build on it. AI_HEALING_ENABLED no longer does anything.
+
 This module provides the OllamaAIHealingService class and related functions
 for capturing test failure context, querying the Ollama AI model for healing
 analysis, and generating detailed healing reports.

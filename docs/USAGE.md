@@ -91,7 +91,23 @@ the same receiver; each branch of a language switch is checked on its own). Only
 the diagnosed occurrence is edited, and an edit is kept only if the exact target
 test ran *and* passed *and* the service confirms the heal. The service never sees
 input values, cookies or storage state, and this client sends **no screenshot**
-(vision is off: `HEAL_VISION` and `HEAL_MASK` are accepted and unused for now).
+unless you turn vision on (`HEAL_VISION=auto|on`, see *Vision* below).
+
+The element inventory is cut to an allowlist before it leaves (`INVENTORY_KEYS` in
+`utils/heal_redact.py`): `tag`, `type`, `role`, `name`, `label`, `placeholder`, `text`,
+`row`, `row_attr`, `aria_label`, `title`, `alt`, `for_attr`, the test hooks and `id`,
+`class`, `name_attr`, `frame`, `shadow`, the `box`, and the probe's facts for proving a
+locator unique or reachable: `pw_text` (the probe's own capped, token-scrubbed copy of
+the text Playwright's `has_text` reads, never a field, select or editable region),
+`pw_cut`, `top_at_center`, `copy_only` and `copy_cut` (elements listed only because they
+hold copy). `disabled`, `hidden`, `pw_cut`, `top_at_center`, `copy_only` and `copy_cut`
+are kept only as booleans, every other key only as a string. The page also carries
+`inventory_more`, `inventory_copy_more`, `inventory_copy_withheld` and
+`inventory_copy_withheld_data`: how many elements, and how many copy-holding elements,
+the probe left out for want of room, and how much visible copy its filters withheld
+(addresses, digit runs, tokens), of which how much sat inside a control or data widget.
+The service uses them so it does not claim a text is unique from a listing that is
+missing some. Each is a whole number from 0 to 1,000,000; anything else is sent as 0.
 `--open-pr` requires a clean working tree and commits only the healed files. For
 pages behind login, set `HEAL_STORAGE_STATE=<playwright storage-state.json>` so
 the page is opened as a signed-in user (the file stays on this machine).
@@ -106,7 +122,28 @@ the page is opened as a signed-in user (the file stays on this machine).
 | `HEAL_SOURCE_ROOTS` | comma separated source roots (default `pages,tests,utils`) |
 | `HEAL_STORAGE_STATE` | storage-state file for pages behind login |
 | `HEAL_ARTIFACTS_DIR` | where `heal-summary.json` goes (default `test_artifacts`) |
-| `HEAL_VISION`, `HEAL_MASK` | accepted; unused until vision lands |
+| `HEAL_VISION` | `off` (default), `auto` or `on`: whether to send one screenshot of the failing page (see *Vision* below) |
+| `HEAL_MASK` | CSS selectors to black out in that screenshot, separated by newlines or `;;` (not commas: a selector may contain one), on top of the default masks below |
+
+**Vision.** With `HEAL_VISION=off` the client never asks the browser for a
+screenshot and the request carries `screenshot: null`: no image byte leaves the
+machine. With `auto` or `on` it takes **one viewport screenshot** (never the full
+page: a late scroll restore can move the page under a click) of the same page the
+inventory came from, with a black box over the **default masks** (password inputs;
+fields with `autocomplete` `cc-*`, `one-time-code`, `current-password` or
+`new-password`; fields whose `name` or `id` contains `pass`, `pwd`, `token`,
+`secret`, `ssn`, `card`, `cvv` or `otp`, which also covers a password field a
+script turned into plain text if it kept such a name; every cross-origin or
+sandboxed frame, whole) and every `HEAL_MASK` selector (separate several with a
+newline or `;;`), and sends it with the viewport size and scroll offset. **The
+screenshot shows whatever the page shows**: anything sensitive that is not
+covered by a default mask must be listed in `HEAL_MASK`. If the
+capture or the masking fails, nothing is sent (never an unmasked picture). What the
+service does with it is the service's decision: `auto` uses it only when the text
+pick fails or is a close call, `on` for every heal (for testing and evaluation),
+and a service whose vision model has not been explicitly allowed to receive images
+sends the image nowhere. The service draws the numbered marks itself and keeps the
+marked image with the heal record, so a reviewer can see what the model saw.
 
 **Language branches.** When a locator depends on page copy and the page is now in
 another language than the last green run, the service returns code that switches
@@ -154,9 +191,12 @@ element that only appears after a click or login step may be missing from the
 inventory (set `HEAL_STORAGE_STATE` for login); only locators the test acts on
 (`click`, `fill`, `check`, `select_option`, ...) are fingerprinted.
 
-> This repo also keeps a **legacy** in-run Ollama healer (the `conftest.py`
-> AI-healing hooks + `AI_HEALING_ENABLED`). That is the older "heal during the
-> run" approach; the agents + `heal.py` above are the v2 out-of-band replacement.
+> The older in-run Ollama healer (`utils/ai_healing.py` + `AI_HEALING_ENABLED`) is
+> **deprecated** and no longer called. Its replacement is in-run *advice* from the heal
+> service: set `HEAL_ADVISE=on` and `HEAL_SERVICE_URL` and a final locator failure is posted
+> to the service in advise mode (a decision and the best locator, no patch, no edit); the
+> answer goes into the healing report, `heal-summary.json` and the observability report.
+> The agents + `heal.py` above remain the out-of-band way to apply a heal.
 
 ---
 

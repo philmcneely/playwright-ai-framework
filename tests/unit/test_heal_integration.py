@@ -106,7 +106,7 @@ def make_service():
                            Endpoint(base_url="http://localhost:11434/v1", model="test-model") if model else None)
         http = TestClient(create_app(core))
         opened.append(http)
-        return ServiceClient("http://testserver", "", http), core
+        return ServiceClient("http://127.0.0.1", "", http), core
     yield build
     for client in opened:
         client.close()
@@ -127,7 +127,7 @@ def project(tmp_path, source=PAGE_PY):
 
 
 def healer(root, base_url, client, verify=lambda test: True):
-    return Healer(client, HealSettings(url="http://testserver", base_url=base_url), verify, root=root, run_id="it1")
+    return Healer(client, HealSettings(url="http://127.0.0.1", base_url=base_url), verify, root=root, run_id="it1")
 
 
 def test_fingerprint_heal_rewrites_the_locator_with_no_model_call(tmp_path, site, service):
@@ -188,3 +188,65 @@ def test_french_page_gets_a_by_language_branch_the_helper_reads(tmp_path, site, 
         assert by_language(pg, {"en": "EN", "fr": "FR"}) == "FR"
         assert by_language(pg, {"de": "DE", "en": "EN"}) == "DE"
         b.close()
+
+
+class StubVision:
+    """The text pick gives no usable answer; the vision call (the one that carries an image) answers with the mark of the listed
+    element whose line holds `wanted`. It keeps what it was sent."""
+
+    def __init__(self, wanted):
+        self.wanted, self.images, self.calls = wanted, [], 0
+
+    def call(self, ep, prompt, images=(), heal_id=""):
+        self.calls += 1
+        if not images:
+            return CallResult(None, "no pick", Usage(100, 8), 5, True)
+        self.images.extend(png for _, png in images)
+        m = re.search(r"^\[(\d+)\].*" + re.escape(self.wanted), prompt, re.M)
+        text = '{"mark": %s, "why": "the box"}' % m.group(1) if m else None
+        return CallResult(text, "" if text else "no pick", Usage(150, 8), 5, True)
+
+
+def test_vision_auto_sends_one_masked_screenshot_and_the_service_picks_by_mark(tmp_path, site):
+    pytest.importorskip("heal_service.overlay", reason="the installed heal-service has no vision support")
+    www, base = site
+    (www / "login.html").write_text(LOGIN_EN.replace("<form>", '<form><input type="password" id="pw" aria-label="Secret">'))
+    root = project(tmp_path / "proj")
+    model = StubVision(wanted='id="u"')
+    core = HealSession(ServiceSettings(), Store(":memory:", 14), model,
+                       Endpoint(base_url="http://localhost:11434/v1", model="test-model"),
+                       vision_endpoint=Endpoint(base_url="http://localhost:11435/v1", model="vision-model", images_allowed=True))
+    http = TestClient(create_app(core))
+    try:
+        h = Healer(ServiceClient("http://127.0.0.1", "", http), HealSettings(url="http://127.0.0.1", base_url=base, vision="auto"),
+                   lambda test: True, root=root, run_id="it-vision")
+        d = h.heal({"name": "test_login", "classname": "tests.test_login", "error": error_for(7, "#username")})
+        assert d["outcome"] == "healed", d
+        assert d["settled_at"] == 4 and d["usage"]["calls"] == 2 and d["usage"]["images"] == 1
+        assert len(model.images) == 1 and model.images[0][:8] == b"\x89PNG\r\n\x1a\n"
+        rec = core.get(d["heal_id"])
+        assert rec["evidence"]["vision"]["ran"] is True and rec["evidence"]["vision"]["trigger"] == "no_pick"
+        assert core.store.get_overlay(d["heal_id"])[:8] == b"\x89PNG\r\n\x1a\n"
+        assert "get_by_test_id(\"login-user\")" in (root / "pages" / "login_page.py").read_text()
+    finally:
+        http.close()
+
+
+def test_vision_off_sends_no_image_to_a_service_that_could_use_one(tmp_path, site):
+    pytest.importorskip("heal_service.overlay", reason="the installed heal-service has no vision support")
+    www, base = site
+    (www / "login.html").write_text(LOGIN_EN)
+    root = project(tmp_path / "proj")
+    model = StubVision(wanted='id="u"')
+    core = HealSession(ServiceSettings(), Store(":memory:", 14), model,
+                       Endpoint(base_url="http://localhost:11434/v1", model="test-model"),
+                       vision_endpoint=Endpoint(base_url="http://localhost:11435/v1", model="vision-model", images_allowed=True))
+    http = TestClient(create_app(core))
+    try:
+        h = Healer(ServiceClient("http://127.0.0.1", "", http), HealSettings(url="http://127.0.0.1", base_url=base),
+                   lambda test: True, root=root, run_id="it-off")
+        d = h.heal({"name": "test_login", "classname": "tests.test_login", "error": error_for(7, "#username")})
+        assert d["outcome"] == "needs_human" and model.images == [] and d["usage"]["images"] == 0
+        assert "vision" not in core.get(d["heal_id"])["evidence"]
+    finally:
+        http.close()

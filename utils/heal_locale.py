@@ -11,14 +11,21 @@ code that picks a locator by the page's language, and that code calls the helper
 The helper returns the entry for the page's language, and the FIRST entry (the original copy) for any other language, so
 a run in a language nobody healed for behaves exactly as it did before the heal. Copy is never translated.
 
-The page language is read from <html lang>, then the browser locale, then Content-Language, never from words on the page.
-A sync Playwright page is asked directly. An async page cannot be asked from this sync function, so its language is the
+The page language is read from <html lang>, then the browser locale, never from words on the page (the Content-Language header
+is not used: the helper cannot see it in the test run, and the heal client picks branches by the same two signals). A sync
+Playwright page is asked directly. An async page cannot be asked from this sync function, so its language is the
 one `track_language(page)` last recorded (call it once when the page is created; the framework's `page` fixture does).
+
+Difference from the TypeScript framework: on a page with NO <html lang> this helper (and the Python heal client, which uses the
+same two signals) falls back to the browser locale (`navigator.language`), while the TypeScript helper reads only the CSS
+`html:lang()` match and so keeps the first entry. Each side is consistent with itself (the branch the client checked live is the
+branch the helper picks at run time), but the two languages do not make the same choice on such a page: give the page an
+<html lang> if you rely on the same behaviour in both.
 
 Features:
     ✓ by_language(receiver, branches): the locator of the page's language, else the first one
-    ✓ page_language(signals): the plain language subtag from the three signals, in priority order
-    ✓ track_language(page): keeps `page._heal_language` current on an async page (domcontentloaded + Content-Language)
+    ✓ page_language(html_lang, browser_locale): the plain language subtag from the two signals, in priority order
+    ✓ track_language(page): keeps `page._heal_language` current on an async page (domcontentloaded)
     ✓ Never raises on a page that cannot be asked: the first entry is returned instead
 
 Environment Variables:
@@ -42,10 +49,9 @@ def subtag(value: Optional[str]) -> str:
     return first.lower() if _SUBTAG.match(first) else ""
 
 
-def page_language(html_lang: Optional[str] = None, browser_locale: Optional[str] = None,
-                  content_language: Optional[str] = None) -> str:
-    """The language subtag from <html lang>, then the browser locale, then Content-Language ("" when none is usable)."""
-    for value in (html_lang, browser_locale, content_language):
+def page_language(html_lang: Optional[str] = None, browser_locale: Optional[str] = None) -> str:
+    """The language subtag from <html lang>, then the browser locale ("" when neither is usable)."""
+    for value in (html_lang, browser_locale):
         found = subtag(value)
         if found:
             return found
@@ -64,7 +70,7 @@ def _current_language(receiver: Any) -> str:
         html_lang, locale = evaluate(_SIGNALS_JS)
     except Exception:
         return ""
-    return page_language(html_lang, locale, getattr(receiver, "_heal_content_language", None))
+    return page_language(html_lang, locale)
 
 
 def by_language(receiver: Any, branches: Dict[str, Any]) -> Any:
@@ -79,22 +85,14 @@ def by_language(receiver: Any, branches: Dict[str, Any]) -> Any:
 
 def track_language(page: Any) -> None:
     """Keep `page._heal_language` current on an async Playwright page. Safe to call on any page; failures are ignored."""
-    def remember_header(response: Any) -> None:
-        try:
-            if response.request.is_navigation_request() and response.frame == page.main_frame:
-                page._heal_content_language = response.headers.get("content-language")
-        except Exception:
-            pass
-
     async def refresh(*_: Any) -> None:
         try:
             html_lang, locale = await page.evaluate(_SIGNALS_JS)
-            setattr(page, ATTR, page_language(html_lang, locale, getattr(page, "_heal_content_language", None)))
+            setattr(page, ATTR, page_language(html_lang, locale))
         except Exception:
             pass                                 # a page that is closing or navigating: the next load refreshes it
 
     try:
-        page.on("response", remember_header)
         page.on("domcontentloaded", refresh)
     except Exception:
         pass
