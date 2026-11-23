@@ -29,8 +29,8 @@ This guide explains how to set up and run Playwright-based Python tests with All
 ## 1. Clone the Repository
 
 ```sh
-git clone https://github.com/your-org/your-repo.git
-cd your-repo
+git clone https://github.com/philmcneely/playwright-ai-framework.git
+cd playwright-ai-framework
 ```
 
 ---
