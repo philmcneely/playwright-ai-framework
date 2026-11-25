@@ -91,6 +91,8 @@ class FakeService:
         self.requests.append((request.method, path, body, request.headers.get("authorization")))
         if path == "/v1/probe.js":
             return httpx.Response(200, text="(only) => ({items: [], more: 0, page: {}})")
+        if request.method == "POST" and request.headers.get("content-type", "").split(";")[0].strip() != "application/json":
+            return httpx.Response(415, json={"detail": "the body must be application/json"})  # as the real service answers
         if self.status != 200:
             return httpx.Response(self.status, json={"detail": "boom"})
         return httpx.Response(200, json=self.replies.pop(0) if self.replies else reply("needs_human", reason="x", why="no more scripted replies"))
@@ -175,6 +177,18 @@ class TestRequest:
         h = Healer(svc.client("tok"), HealSettings(), Verify(), root=project, live_factory=lambda r, p: FakeLive())
         h.heal(FAILURE)
         assert {a for *_, a in svc.requests} == {"Bearer tok"}
+
+    def test_posts_carry_a_json_content_type(self, project):
+        svc = FakeService(reply("not_drift"))
+        seen = []
+        handler = svc.handler
+
+        def spy(request):
+            seen.append((request.method, request.headers.get("content-type")))
+            return handler(request)
+        client = ServiceClient("https://svc", "", httpx.Client(transport=httpx.MockTransport(spy)))
+        Healer(client, HealSettings(), Verify(), root=project, live_factory=lambda r, p: FakeLive()).heal(FAILURE)
+        assert [c for m, c in seen if m == "POST"] and {c for m, c in seen if m == "POST"} == {"application/json"}
 
     def test_files_outside_the_roots_are_not_sent(self, project):
         (project / "conftest.py").write_text("x = 1\n")
